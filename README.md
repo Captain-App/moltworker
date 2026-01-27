@@ -1,8 +1,10 @@
-# Clawdbot in Cloudflare Sandbox
+# Moltbot in Cloudflare Sandbox
 
-Run [Clawdbot](https://clawd.bot/) personal AI assistant in a Cloudflare Sandbox.
+Run [Moltbot](https://molt.bot/) personal AI assistant in a [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/).
 
 ## Quick Start
+
+_Cloudflare Sandboxes are available on the [Workers Paid plan](https://dash.cloudflare.com/?to=/:account/workers/plans)._
 
 ```bash
 # Install dependencies
@@ -48,13 +50,13 @@ To use the admin UI at `/_admin/` for device management, you need to:
 The easiest way to protect your worker is using the built-in Cloudflare Access integration for workers.dev:
 
 1. Go to the [Workers & Pages dashboard](https://dash.cloudflare.com/?to=/:account/workers-and-pages)
-2. Select your Worker (e.g., `clawdbot-sandbox`)
-3. Go to **Settings** > **Domains & Routes**
-4. For `workers.dev`, click **Enable Cloudflare Access**
+2. Select your Worker (e.g., `moltbot-sandbox`)
+3. In **Settings**, under **Domains & Routes**, in the `workers.dev` row, click the meatballs menu (`...`)
+4. Click **Enable Cloudflare Access**
 5. Click **Manage Cloudflare Access** to configure who can access:
    - Add your email address to the allow list
    - Or configure other identity providers (Google, GitHub, etc.)
-6. Note the **Application Audience (AUD)** tag from the Access application settings
+6. Copy the **Application Audience (AUD)** tag from the Access application settings. This will be your `CF_ACCESS_AUD` in Step 2 below
 
 ### 2. Set Access Secrets
 
@@ -64,7 +66,7 @@ After enabling Cloudflare Access, set the secrets so the worker can validate JWT
 # Your Cloudflare Access team domain (e.g., "myteam.cloudflareaccess.com")
 npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 
-# The Application Audience (AUD) tag from your Access application
+# The Application Audience (AUD) tag from your Access application that you copied in the step above
 npx wrangler secret put CF_ACCESS_AUD
 ```
 
@@ -85,7 +87,7 @@ If you prefer more control, you can manually create an Access application:
 1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
 2. Navigate to **Access** > **Applications**
 3. Create a new **Self-hosted** application
-4. Set the application domain to your Worker URL (e.g., `clawdbot-sandbox.your-subdomain.workers.dev`)
+4. Set the application domain to your Worker URL (e.g., `moltbot-sandbox.your-subdomain.workers.dev`)
 5. Add paths to protect: `/_admin/*`, `/api/*`, `/debug/*`
 6. Configure your desired identity providers (e.g., email OTP, Google, GitHub)
 7. Copy the **Application Audience (AUD)** tag and set the secrets as shown above
@@ -101,7 +103,7 @@ DEBUG_ROUTES=true           # Enable /debug/* routes (optional)
 
 ## Authentication
 
-By default, clawdbot uses **device pairing** for authentication. When a new device (browser, CLI, etc.) connects, it must be approved via the admin UI at `/_admin/`.
+By default, moltbot uses **device pairing** for authentication. When a new device (browser, CLI, etc.) connects, it must be approved via the admin UI at `/_admin/`.
 
 ### Device Pairing
 
@@ -127,14 +129,14 @@ For local development only, set `DEV_MODE=true` in `.dev.vars` to skip Cloudflar
 
 ## Persistent Storage (R2)
 
-By default, clawdbot data (configs, paired devices, conversation history) is lost when the container restarts. To enable persistent storage across sessions, configure R2:
+By default, moltbot data (configs, paired devices, conversation history) is lost when the container restarts. To enable persistent storage across sessions, configure R2:
 
 ### 1. Create R2 API Token
 
 1. Go to **R2** > **Overview** in the [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. Click **Manage R2 API Tokens**
 3. Create a new token with **Object Read & Write** permissions
-4. Select the `clawdbot-data` bucket (created automatically on first deploy)
+4. Select the `moltbot-data` bucket (created automatically on first deploy)
 5. Copy the **Access Key ID** and **Secret Access Key**
 
 ### 2. Set Secrets
@@ -157,18 +159,18 @@ To find your Account ID: Go to the [Cloudflare Dashboard](https://dash.cloudflar
 R2 storage uses a backup/restore approach for simplicity:
 
 **On container startup:**
-- If R2 is mounted and contains backup data, it's restored to `/root/.clawdbot`
-- Clawdbot uses its default paths (no special configuration needed)
+- If R2 is mounted and contains backup data, it's restored to `/root/.moltbot`
+- Moltbot uses its default paths (no special configuration needed)
 
 **During operation:**
-- A cron job runs every 5 minutes to sync `/root/.clawdbot` → R2
+- A cron job runs every 5 minutes to sync `/root/.moltbot` → R2
 - You can also trigger a manual backup from the admin UI at `/_admin/`
 
 **In the admin UI:**
 - When R2 is configured, you'll see "Last backup: [timestamp]"
 - Click "Backup Now" to trigger an immediate sync
 
-Without R2 credentials, clawdbot still works but uses ephemeral storage (data lost on container restart).
+Without R2 credentials, moltbot still works but uses ephemeral storage (data lost on container restart).
 
 ## Container Lifecycle
 
@@ -187,7 +189,7 @@ When the container sleeps, the next request will trigger a cold start. If you ha
 
 Access the admin UI at `/_admin/` to:
 - **R2 Storage Status** - Shows if R2 is configured, last backup time, and a "Backup Now" button
-- **Restart Gateway** - Kill and restart the clawdbot gateway process
+- **Restart Gateway** - Kill and restart the moltbot gateway process
 - **Device Pairing** - View pending requests, approve devices individually or all at once, view paired devices
 
 The admin UI requires Cloudflare Access authentication (or `DEV_MODE=true` for local development).
@@ -198,7 +200,7 @@ Debug endpoints are available at `/debug/*` when enabled (requires `DEBUG_ROUTES
 
 - `GET /debug/processes` - List all container processes
 - `GET /debug/logs?id=<process_id>` - Get logs for a specific process
-- `GET /debug/version` - Get container and clawdbot version info
+- `GET /debug/version` - Get container and moltbot version info
 
 ## Optional: Chat Channels
 
@@ -224,9 +226,9 @@ npx wrangler secret put SLACK_APP_TOKEN
 npm run deploy
 ```
 
-## Cloudflare AI Gateway
+## Optional: Cloudflare AI Gateway
 
-You can route Anthropic API requests through [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) for caching, rate limiting, analytics, and cost tracking.
+You can route Anthropic API requests through [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) for unified billing, caching, rate limiting, analytics, and cost tracking.
 
 ### Setup
 
@@ -243,14 +245,6 @@ npx wrangler secret put ANTHROPIC_BASE_URL
 ```bash
 npm run deploy
 ```
-
-### Benefits
-
-- **Caching**: Cache identical requests to reduce costs
-- **Rate limiting**: Protect against runaway API costs
-- **Analytics**: Track token usage, costs, and latency
-- **Logging**: Full request/response logging for debugging
-- **BYOK**: Optionally store your Anthropic API key in AI Gateway instead of as a Worker secret
 
 ## All Secrets Reference
 
@@ -274,6 +268,8 @@ npm run deploy
 
 ## Troubleshooting
 
+**`npm run dev` fails with an `Unauthorized` error:** You need to enable Cloudflare Containers in the [Containers dashboard](https://dash.cloudflare.com/?to=/:account/workers/containers)
+
 **Gateway fails to start:** Check `npx wrangler secret list` and `npx wrangler tail`
 
 **Config changes not working:** Edit the `# Build cache bust:` comment in `Dockerfile` and redeploy
@@ -286,7 +282,7 @@ npm run deploy
 
 ## Links
 
-- [Clawdbot](https://clawd.bot/)
-- [Clawdbot Docs](https://docs.clawd.bot)
+- [Moltbot](https://molt.bot/)
+- [Moltbot Docs](https://docs.molt.bot)
 - [Cloudflare Sandbox Docs](https://developers.cloudflare.com/sandbox/)
 - [Cloudflare Access Docs](https://developers.cloudflare.com/cloudflare-one/policies/access/)
