@@ -294,7 +294,7 @@ The container includes pre-installed skills in `/root/clawd/skills/`:
 
 ### cloudflare-browser
 
-Browser automation via the built-in CDP (Chrome DevTools Protocol) shim. This allows Moltbot to control a headless browser for tasks like web scraping, screenshots, and automated testing. No additional configuration required - the CDP secret is auto-generated and the worker URL is derived from the request.
+Browser automation via the built-in CDP (Chrome DevTools Protocol) shim. This allows Moltbot to control a headless browser for tasks like web scraping, screenshots, and automated testing.
 
 **Scripts:**
 - `screenshot.js` - Capture a screenshot of a URL
