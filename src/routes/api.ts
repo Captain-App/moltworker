@@ -291,6 +291,52 @@ adminApi.post('/gateway/restart', async (c) => {
   }
 });
 
+// POST /api/admin/container/reset - FORCE reset: kill all processes and restart gateway
+adminApi.post('/container/reset', async (c) => {
+  const sandbox = c.get('sandbox');
+
+  try {
+    // Get ALL processes and kill them
+    const allProcesses = await sandbox.listProcesses();
+    console.log(`[RESET] Found ${allProcesses.length} processes to kill`);
+    
+    for (const proc of allProcesses) {
+      console.log(`[RESET] Killing process ${proc.id}: ${proc.command}`);
+      try {
+        await proc.kill();
+      } catch (killErr) {
+        console.error(`[RESET] Error killing process ${proc.id}:`, killErr);
+      }
+    }
+    
+    // Wait for processes to die
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // Clear any lock files
+    try {
+      const clearLocks = await sandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null; echo "locks cleared"');
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (e) {
+      console.log('[RESET] Lock clear warning:', e);
+    }
+
+    // Start fresh gateway
+    const bootPromise = ensureMoltbotGateway(sandbox, c.env).catch((err) => {
+      console.error('[RESET] Gateway start failed:', err);
+    });
+    c.executionCtx.waitUntil(bootPromise);
+
+    return c.json({
+      success: true,
+      message: `Killed ${allProcesses.length} processes. Fresh gateway starting...`,
+      killedProcesses: allProcesses.map(p => ({ id: p.id, command: p.command })),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
 // Mount admin API routes under /admin
 api.route('/admin', adminApi);
 

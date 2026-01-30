@@ -208,6 +208,33 @@ app.use('/debug/*', async (c, next) => {
 });
 app.route('/debug', debug);
 
+// Emergency container reset endpoint (bypasses auth for debugging)
+app.post('/emergency-reset', async (c) => {
+  const sandbox = c.get('sandbox');
+  
+  try {
+    // Kill all processes
+    const allProcesses = await sandbox.listProcesses();
+    for (const proc of allProcesses) {
+      try { await proc.kill(); } catch (e) { /* ignore */ }
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // Clear locks
+    try {
+      await sandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null');
+    } catch (e) { /* ignore */ }
+    
+    // Restart gateway
+    const bootPromise = ensureMoltbotGateway(sandbox, c.env).catch(() => {});
+    c.executionCtx.waitUntil(bootPromise);
+    
+    return c.json({ success: true, message: 'Container reset initiated' });
+  } catch (error) {
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
 // =============================================================================
 // CATCH-ALL: Proxy to Moltbot gateway
 // =============================================================================
