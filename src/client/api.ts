@@ -140,3 +140,59 @@ export async function triggerSync(): Promise<SyncResponse> {
     method: 'POST',
   });
 }
+
+// =============================================================================
+// User Secrets Management
+// =============================================================================
+
+export interface SecretsResponse {
+  secrets: Record<string, string | null>;
+  configured: string[];
+  success?: boolean;
+  message?: string;
+  error?: string;
+}
+
+export const SECRET_LABELS: Record<string, { label: string; hint: string }> = {
+  TELEGRAM_BOT_TOKEN: {
+    label: 'Telegram Bot Token',
+    hint: 'Get from @BotFather on Telegram',
+  },
+  DISCORD_BOT_TOKEN: {
+    label: 'Discord Bot Token',
+    hint: 'Get from Discord Developer Portal',
+  },
+  SLACK_BOT_TOKEN: {
+    label: 'Slack Bot Token',
+    hint: 'xoxb-... token from Slack App',
+  },
+  SLACK_APP_TOKEN: {
+    label: 'Slack App Token',
+    hint: 'xapp-... token for Socket Mode',
+  },
+  ANTHROPIC_API_KEY: {
+    label: 'Anthropic API Key',
+    hint: 'Override the default API key',
+  },
+  OPENAI_API_KEY: {
+    label: 'OpenAI API Key',
+    hint: 'For OpenAI model access',
+  },
+};
+
+export async function getSecrets(): Promise<SecretsResponse> {
+  return apiRequest<SecretsResponse>('/secrets');
+}
+
+export async function updateSecrets(secrets: Record<string, string>): Promise<SecretsResponse> {
+  return apiRequest<SecretsResponse>('/secrets', {
+    method: 'PUT',
+    body: JSON.stringify(secrets),
+  });
+}
+
+export async function deleteSecret(key: string): Promise<{ success: boolean; message?: string; error?: string }> {
+  return apiRequest<{ success: boolean; message?: string; error?: string }>(`/secrets/${key}`, {
+    method: 'DELETE',
+  });
+}

@@ -334,6 +334,103 @@
   filter: brightness(1.1);
 }
 
+/* Secrets section */
+.secrets-section {
+  border-left: 3px solid var(--warning-color);
+}
+
+.secrets-section .hint {
+  margin: 0 0 1rem 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.info-banner {
+  background-color: rgba(59, 130, 246, 0.15);
+  border: 1px solid #3b82f6;
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  color: #3b82f6;
+  font-size: 0.875rem;
+}
+
+.secrets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.secret-card {
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 1rem;
+}
+
+.secret-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.secret-header label {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.secret-badge {
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.secret-badge.configured {
+  background-color: rgba(74, 222, 128, 0.2);
+  color: var(--success-color);
+}
+
+.secret-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0 0 0.75rem 0;
+}
+
+.secret-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.secret-input-row input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background-color: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.secret-input-row input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.secret-input-row input::placeholder {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.secret-input-row .btn-danger {
+  padding: 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
 /* Responsive adjustments */
 @media (max-width: 640px) {
   .devices-section {
@@ -345,7 +442,8 @@
     align-items: flex-start;
   }
 
-  .devices-grid {
+  .devices-grid,
+  .secrets-grid {
     grid-template-columns: 1fr;
   }
 }

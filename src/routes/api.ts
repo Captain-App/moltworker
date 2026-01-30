@@ -1,27 +1,25 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
-import { createAccessMiddleware } from '../auth';
-import { ensureMoltbotGateway, findExistingMoltbotProcess, mountR2Storage, syncToR2, waitForProcess } from '../gateway';
-import { R2_MOUNT_PATH } from '../config';
+import { ensureMoltbotGateway, findExistingMoltbotProcess, mountR2Storage, syncToR2, waitForProcess, deriveUserGatewayToken } from '../gateway';
+import { R2_MOUNT_PATH, getR2MountPathForUser } from '../config';
 
 // CLI commands can take 10-15 seconds to complete due to WebSocket connection overhead
 const CLI_TIMEOUT_MS = 20000;
 
 /**
  * API routes
- * - /api/admin/* - Protected admin API routes (Cloudflare Access required)
- * 
+ * - /api/admin/* - Protected admin API routes (Supabase auth via main middleware)
+ *
  * Note: /api/status is now handled by publicRoutes (no auth required)
  */
 const api = new Hono<AppEnv>();
 
 /**
- * Admin API routes - all protected by Cloudflare Access
+ * Admin API routes - protected by Supabase auth (applied in main index.ts middleware)
  */
 const adminApi = new Hono<AppEnv>();
 
-// Middleware: Verify Cloudflare Access JWT for all admin routes
-adminApi.use('*', createAccessMiddleware({ type: 'json' }));
+// Note: Auth is handled by the Supabase middleware in index.ts before these routes are reached
 
 // GET /api/admin/devices - List pending and paired devices
 adminApi.get('/devices', async (c) => {
@@ -175,21 +173,11 @@ adminApi.post('/devices/approve-all', async (c) => {
 // GET /api/admin/storage - Get R2 storage status and last sync time
 adminApi.get('/storage', async (c) => {
   const sandbox = c.get('sandbox');
-  
-  // DEBUG: Check what's in c.env
-  const envKeys = Object.keys(c.env).sort();
-  const debugInfo = {
-    envKeys,
-    r2KeyExists: 'R2_ACCESS_KEY_ID' in c.env,
-    r2SecretExists: 'R2_SECRET_ACCESS_KEY' in c.env,
-    cfAccountExists: 'CF_ACCOUNT_ID' in c.env,
-    r2KeyValue: c.env.R2_ACCESS_KEY_ID ? c.env.R2_ACCESS_KEY_ID.substring(0, 4) + '...' : null,
-    r2SecretValue: c.env.R2_SECRET_ACCESS_KEY ? c.env.R2_SECRET_ACCESS_KEY.substring(0, 4) + '...' : null,
-  };
-  
+  const user = c.get('user');
+
   const hasCredentials = !!(
-    c.env.R2_ACCESS_KEY_ID && 
-    c.env.R2_SECRET_ACCESS_KEY && 
+    c.env.R2_ACCESS_KEY_ID &&
+    c.env.R2_SECRET_ACCESS_KEY &&
     c.env.CF_ACCOUNT_ID
   );
 
@@ -200,20 +188,34 @@ adminApi.get('/storage', async (c) => {
   if (!c.env.CF_ACCOUNT_ID) missing.push('CF_ACCOUNT_ID');
 
   let lastSync: string | null = null;
+  let backupFiles: string[] = [];
+
+  // Determine the user-specific mount path
+  const userMountPath = user?.r2Prefix
+    ? getR2MountPathForUser(user.r2Prefix)
+    : R2_MOUNT_PATH;
 
   // If R2 is configured, check for last sync timestamp
   if (hasCredentials) {
     try {
-      // Mount R2 if not already mounted
-      await mountR2Storage(sandbox, c.env);
-      
+      // Mount R2 if not already mounted (with user prefix)
+      await mountR2Storage(sandbox, c.env, { r2Prefix: user?.r2Prefix });
+
       // Check for sync marker file
-      const proc = await sandbox.startProcess(`cat ${R2_MOUNT_PATH}/.last-sync 2>/dev/null || echo ""`);
+      const proc = await sandbox.startProcess(`cat ${userMountPath}/.last-sync 2>/dev/null || echo ""`);
       await waitForProcess(proc, 5000);
       const logs = await proc.getLogs();
       const timestamp = logs.stdout?.trim();
       if (timestamp && timestamp !== '') {
         lastSync = timestamp;
+      }
+
+      // List what's in the backup directory
+      const listProc = await sandbox.startProcess(`ls -la ${userMountPath}/ 2>/dev/null | head -20`);
+      await waitForProcess(listProc, 5000);
+      const listLogs = await listProc.getLogs();
+      if (listLogs.stdout) {
+        backupFiles = listLogs.stdout.split('\n').filter(l => l.trim());
       }
     } catch {
       // Ignore errors checking sync status
@@ -224,8 +226,9 @@ adminApi.get('/storage', async (c) => {
     configured: hasCredentials,
     missing: missing.length > 0 ? missing : undefined,
     lastSync,
-    debug: debugInfo,
-    message: hasCredentials 
+    mountPath: userMountPath,
+    backupFiles,
+    message: hasCredentials
       ? 'R2 storage is configured. Your data will persist across container restarts.'
       : 'R2 storage is not configured. Paired devices and conversations will be lost when the container restarts.',
   });
@@ -234,8 +237,10 @@ adminApi.get('/storage', async (c) => {
 // POST /api/admin/storage/sync - Trigger a manual sync to R2
 adminApi.post('/storage/sync', async (c) => {
   const sandbox = c.get('sandbox');
-  
-  const result = await syncToR2(sandbox, c.env);
+  const user = c.get('user');
+
+  // Pass user's R2 prefix for per-user backup
+  const result = await syncToR2(sandbox, c.env, { r2Prefix: user?.r2Prefix });
   
   if (result.success) {
     return c.json({
@@ -253,14 +258,15 @@ adminApi.post('/storage/sync', async (c) => {
   }
 });
 
-// POST /api/admin/gateway/restart - Kill the current gateway and start a new one
-adminApi.post('/gateway/restart', async (c) => {
+// GET/POST /api/admin/gateway/restart - Kill the current gateway and start a new one
+// GET is supported for easy browser access on mobile
+adminApi.get('/gateway/restart', async (c) => {
   const sandbox = c.get('sandbox');
+  const user = c.get('user');
 
   try {
-    // Find and kill the existing gateway process
     const existingProcess = await findExistingMoltbotProcess(sandbox);
-    
+
     if (existingProcess) {
       console.log('Killing existing gateway process:', existingProcess.id);
       try {
@@ -268,22 +274,57 @@ adminApi.post('/gateway/restart', async (c) => {
       } catch (killErr) {
         console.error('Error killing process:', killErr);
       }
-      // Wait a moment for the process to die
       await new Promise(r => setTimeout(r, 2000));
     }
 
-    // Start a new gateway in the background
-    const bootPromise = ensureMoltbotGateway(sandbox, c.env).catch((err) => {
+    const bootPromise = ensureMoltbotGateway(sandbox, c.env, user?.id).catch((err) => {
       console.error('Gateway restart failed:', err);
     });
     c.executionCtx.waitUntil(bootPromise);
 
     return c.json({
       success: true,
-      message: existingProcess 
+      message: existingProcess
         ? 'Gateway process killed, new instance starting...'
         : 'No existing process found, starting new instance...',
       previousProcessId: existingProcess?.id,
+      sandbox: user?.sandboxName,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+adminApi.post('/gateway/restart', async (c) => {
+  const sandbox = c.get('sandbox');
+  const user = c.get('user');
+
+  try {
+    const existingProcess = await findExistingMoltbotProcess(sandbox);
+
+    if (existingProcess) {
+      console.log('Killing existing gateway process:', existingProcess.id);
+      try {
+        await existingProcess.kill();
+      } catch (killErr) {
+        console.error('Error killing process:', killErr);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const bootPromise = ensureMoltbotGateway(sandbox, c.env, user?.id).catch((err) => {
+      console.error('Gateway restart failed:', err);
+    });
+    c.executionCtx.waitUntil(bootPromise);
+
+    return c.json({
+      success: true,
+      message: existingProcess
+        ? 'Gateway process killed, new instance starting...'
+        : 'No existing process found, starting new instance...',
+      previousProcessId: existingProcess?.id,
+      sandbox: user?.sandboxName,
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -335,6 +376,336 @@ adminApi.post('/container/reset', async (c) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: errorMessage }, 500);
   }
+});
+
+// =============================================================================
+// User Secrets Management
+// Stored in R2 at users/{userId}/secrets.json
+// =============================================================================
+
+interface UserSecrets {
+  TELEGRAM_BOT_TOKEN?: string;
+  DISCORD_BOT_TOKEN?: string;
+  SLACK_BOT_TOKEN?: string;
+  SLACK_APP_TOKEN?: string;
+  ANTHROPIC_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+}
+
+const SECRET_KEYS: (keyof UserSecrets)[] = [
+  'TELEGRAM_BOT_TOKEN',
+  'DISCORD_BOT_TOKEN',
+  'SLACK_BOT_TOKEN',
+  'SLACK_APP_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+];
+
+function maskSecret(value: string | undefined): string | null {
+  if (!value) return null;
+  if (value.length <= 8) return '****';
+  return value.slice(0, 4) + '****' + value.slice(-4);
+}
+
+// GET /api/admin/secrets - Get current secrets (masked for display)
+adminApi.get('/secrets', async (c) => {
+  const user = c.get('user');
+  if (!user) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+
+  try {
+    const secretsKey = `${user.r2Prefix}/secrets.json`;
+    const object = await c.env.MOLTBOT_BUCKET.get(secretsKey);
+
+    let secrets: UserSecrets = {};
+    if (object) {
+      const text = await object.text();
+      secrets = JSON.parse(text);
+    }
+
+    // Return masked values and which secrets are configured
+    const masked: Record<string, string | null> = {};
+    const configured: string[] = [];
+
+    for (const key of SECRET_KEYS) {
+      masked[key] = maskSecret(secrets[key]);
+      if (secrets[key]) {
+        configured.push(key);
+      }
+    }
+
+    return c.json({
+      secrets: masked,
+      configured,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// PUT /api/admin/secrets - Update secrets
+adminApi.put('/secrets', async (c) => {
+  const user = c.get('user');
+  if (!user) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+
+  try {
+    const body = await c.req.json() as Partial<UserSecrets>;
+    const secretsKey = `${user.r2Prefix}/secrets.json`;
+
+    // Load existing secrets
+    let secrets: UserSecrets = {};
+    const existing = await c.env.MOLTBOT_BUCKET.get(secretsKey);
+    if (existing) {
+      secrets = JSON.parse(await existing.text());
+    }
+
+    // Update only provided values (empty string = delete)
+    for (const key of SECRET_KEYS) {
+      if (key in body) {
+        const value = body[key];
+        if (value === '' || value === null) {
+          delete secrets[key];
+        } else if (value) {
+          secrets[key] = value;
+        }
+      }
+    }
+
+    // Save to R2
+    await c.env.MOLTBOT_BUCKET.put(secretsKey, JSON.stringify(secrets, null, 2), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+
+    // Return updated masked values
+    const masked: Record<string, string | null> = {};
+    const configured: string[] = [];
+
+    for (const key of SECRET_KEYS) {
+      masked[key] = maskSecret(secrets[key]);
+      if (secrets[key]) {
+        configured.push(key);
+      }
+    }
+
+    return c.json({
+      success: true,
+      secrets: masked,
+      configured,
+      message: 'Secrets updated. Restart the gateway to apply changes.',
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// DELETE /api/admin/secrets/:key - Delete a specific secret
+adminApi.delete('/secrets/:key', async (c) => {
+  const user = c.get('user');
+  if (!user) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+
+  const key = c.req.param('key') as keyof UserSecrets;
+  if (!SECRET_KEYS.includes(key)) {
+    return c.json({ error: 'Invalid secret key' }, 400);
+  }
+
+  try {
+    const secretsKey = `${user.r2Prefix}/secrets.json`;
+
+    // Load existing secrets
+    let secrets: UserSecrets = {};
+    const existing = await c.env.MOLTBOT_BUCKET.get(secretsKey);
+    if (existing) {
+      secrets = JSON.parse(await existing.text());
+    }
+
+    // Delete the specific key
+    delete secrets[key];
+
+    // Save to R2
+    await c.env.MOLTBOT_BUCKET.put(secretsKey, JSON.stringify(secrets, null, 2), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+
+    return c.json({
+      success: true,
+      message: `${key} deleted. Restart the gateway to apply changes.`,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// =============================================================================
+// Super Admin: Debug other users (requires ADMIN_USER_IDS env var)
+// =============================================================================
+
+function isAdmin(userId: string, env: { ADMIN_USER_IDS?: string }): boolean {
+  const adminIds = env.ADMIN_USER_IDS?.split(',').map(id => id.trim()) || [];
+  return adminIds.includes(userId);
+}
+
+// GET /api/admin/users - List all users from R2
+adminApi.get('/users', async (c) => {
+  const user = c.get('user');
+  if (!user || !isAdmin(user.id, c.env)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  try {
+    // List all objects under users/ prefix
+    const listed = await c.env.MOLTBOT_BUCKET.list({ prefix: 'users/' });
+
+    // Extract unique user IDs from paths like users/{userId}/secrets.json
+    const userIds = new Set<string>();
+    for (const obj of listed.objects) {
+      const match = obj.key.match(/^users\/([^/]+)\//);
+      if (match) {
+        userIds.add(match[1]);
+      }
+    }
+
+    return c.json({
+      count: userIds.size,
+      users: Array.from(userIds).map(id => ({
+        id,
+        sandboxName: `openclaw-${id}`,
+      })),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/users/:userId/debug - Debug another user's sandbox
+adminApi.get('/users/:userId/debug', async (c) => {
+  const user = c.get('user');
+  if (!user || !isAdmin(user.id, c.env)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const targetUserId = c.req.param('userId');
+  const { getSandbox } = await import('@cloudflare/sandbox');
+
+  // Get target user's sandbox
+  const targetSandbox = getSandbox(c.env.Sandbox, `openclaw-${targetUserId}`, { keepAlive: true });
+
+  try {
+    const processes = await targetSandbox.listProcesses();
+
+    const processData = await Promise.all(processes.map(async p => {
+      const data: Record<string, unknown> = {
+        id: p.id,
+        command: p.command,
+        status: p.status,
+        startTime: p.startTime?.toISOString(),
+        exitCode: p.exitCode,
+      };
+
+      // Get logs for failed/completed processes
+      if (p.status === 'failed' || p.status === 'completed' || p.command.includes('start-moltbot')) {
+        try {
+          const logs = await p.getLogs();
+          data.stdout = (logs.stdout || '').slice(-2000); // Last 2000 chars
+          data.stderr = (logs.stderr || '').slice(-2000);
+        } catch {
+          data.logs_error = 'Failed to retrieve logs';
+        }
+      }
+
+      return data;
+    }));
+
+    // Sort: running first, then by start time
+    processData.sort((a, b) => {
+      if (a.status === 'running' && b.status !== 'running') return -1;
+      if (b.status === 'running' && a.status !== 'running') return 1;
+      return 0;
+    });
+
+    return c.json({
+      targetUser: targetUserId,
+      sandboxName: `openclaw-${targetUserId}`,
+      processCount: processes.length,
+      processes: processData,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /api/admin/users/:userId/reset - Reset another user's container
+adminApi.post('/users/:userId/reset', async (c) => {
+  const user = c.get('user');
+  if (!user || !isAdmin(user.id, c.env)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const targetUserId = c.req.param('userId');
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const { ensureMoltbotGateway } = await import('../gateway');
+
+  const targetSandbox = getSandbox(c.env.Sandbox, `openclaw-${targetUserId}`, { keepAlive: true });
+
+  try {
+    // Kill all processes
+    const processes = await targetSandbox.listProcesses();
+    for (const proc of processes) {
+      try { await proc.kill(); } catch (e) { /* ignore */ }
+    }
+
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Clear locks
+    try {
+      await targetSandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null');
+    } catch (e) { /* ignore */ }
+
+    // Restart gateway
+    const bootPromise = ensureMoltbotGateway(targetSandbox, c.env, targetUserId).catch(() => {});
+    c.executionCtx.waitUntil(bootPromise);
+
+    return c.json({
+      success: true,
+      message: 'Container reset initiated',
+      targetUser: targetUserId,
+      sandboxName: `openclaw-${targetUserId}`,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/gateway-token - Exchange JWT for gateway token (authenticated users only)
+// The frontend calls this to get the token needed to connect to their gateway
+api.get('/gateway-token', async (c) => {
+  const user = c.get('user');
+
+  if (!user) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+
+  if (!c.env.MOLTBOT_GATEWAY_TOKEN) {
+    return c.json({ error: 'Gateway token not configured' }, 500);
+  }
+
+  // Derive the per-user gateway token
+  const gatewayToken = await deriveUserGatewayToken(c.env.MOLTBOT_GATEWAY_TOKEN, user.id);
+
+  return c.json({
+    token: gatewayToken,
+    userId: user.id,
+  });
 });
 
 // Mount admin API routes under /admin

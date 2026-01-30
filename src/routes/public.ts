@@ -1,7 +1,20 @@
 import { Hono } from 'hono';
-import type { AppEnv } from '../types';
+import { getSandbox, type SandboxOptions } from '@cloudflare/sandbox';
+import type { AppEnv, MoltbotEnv } from '../types';
 import { MOLTBOT_PORT } from '../config';
 import { findExistingMoltbotProcess } from '../gateway';
+import { verifySupabaseJWT } from '../../platform/auth/supabase-jwt';
+
+/**
+ * Build sandbox options based on environment configuration.
+ */
+function buildSandboxOptions(env: MoltbotEnv): SandboxOptions {
+  const sleepAfter = env.SANDBOX_SLEEP_AFTER?.toLowerCase() || 'never';
+  if (sleepAfter === 'never') {
+    return { keepAlive: true };
+  }
+  return { sleepAfter };
+}
 
 /**
  * Public routes - NO Cloudflare Access authentication required
@@ -30,16 +43,37 @@ publicRoutes.get('/logo-small.png', (c) => {
   return c.env.ASSETS.fetch(c.req.raw);
 });
 
-// GET /api/status - Public health check for gateway status (no auth required)
+// GET /api/status - Health check for gateway status
+// Checks the user's sandbox if authenticated, otherwise default sandbox
 publicRoutes.get('/api/status', async (c) => {
-  const sandbox = c.get('sandbox');
-  
+  let sandbox = c.get('sandbox');
+
+  // Try to get authenticated user's sandbox
+  try {
+    const token = c.req.header('Authorization')?.replace('Bearer ', '') ||
+                  c.req.raw.headers.get('cookie')?.match(/sb-access-token=([^;]+)/)?.[1];
+
+    if (token && c.env.SUPABASE_JWT_SECRET) {
+      // Don't validate issuer - signature verification with secret is sufficient
+      const decoded = await verifySupabaseJWT(token, c.env.SUPABASE_JWT_SECRET);
+      if (decoded) {
+        const userId = decoded.sub;
+        const sandboxName = `openclaw-${userId}`;
+        const options = buildSandboxOptions(c.env);
+        sandbox = getSandbox(c.env.Sandbox, sandboxName, options);
+        console.log(`[API/status] Using authenticated user sandbox: ${sandboxName}`);
+      }
+    }
+  } catch (err) {
+    console.log('[API/status] Auth check failed, using default sandbox:', err);
+  }
+
   try {
     const process = await findExistingMoltbotProcess(sandbox);
     if (!process) {
       return c.json({ ok: false, status: 'not_running' });
     }
-    
+
     // Process exists, check if it's actually responding
     // Try to reach the gateway with a short timeout
     try {
@@ -62,5 +96,8 @@ publicRoutes.get('/_admin/assets/*', async (c) => {
   const assetUrl = new URL(assetPath, url.origin);
   return c.env.ASSETS.fetch(new Request(assetUrl.toString(), c.req.raw));
 });
+
+// NOTE: /assets/* is NOT handled here - those requests go to the container proxy
+// The auth middleware bypasses auth for /assets/* paths so they can be proxied
 
 export { publicRoutes };

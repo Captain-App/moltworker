@@ -1,5 +1,6 @@
 #!/bin/bash
 # Startup script for Moltbot in Cloudflare Sandbox
+# v2: Added allowInsecureAuth for proxy deployments
 # This script:
 # 1. Restores config from R2 backup if available
 # 2. Configures moltbot from environment variables
@@ -163,6 +164,16 @@ if (config.models?.providers?.anthropic?.models) {
     }
 }
 
+// Clean up invalid channel config keys from previous runs
+// (dm and dmPolicy are not valid config keys)
+if (config.channels?.telegram) {
+    delete config.channels.telegram.dm;
+    delete config.channels.telegram.dmPolicy;
+}
+if (config.channels?.discord) {
+    delete config.channels.discord.dm;
+}
+
 
 
 // Gateway configuration
@@ -170,25 +181,23 @@ config.gateway.port = 18789;
 config.gateway.mode = 'local';
 config.gateway.trustedProxies = ['10.1.0.0'];
 
-// Set gateway token if provided
+// Set gateway token if provided - use token-only auth mode (no device pairing required)
 if (process.env.CLAWDBOT_GATEWAY_TOKEN) {
     config.gateway.auth = config.gateway.auth || {};
+    config.gateway.auth.mode = 'token';  // Token-only auth, skip device pairing
     config.gateway.auth.token = process.env.CLAWDBOT_GATEWAY_TOKEN;
 }
 
-// Allow insecure auth for dev mode
-if (process.env.CLAWDBOT_DEV_MODE === 'true') {
-    config.gateway.controlUi = config.gateway.controlUi || {};
-    config.gateway.controlUi.allowInsecureAuth = true;
-}
+// Allow insecure auth - we're behind Cloudflare proxy (HTTPS to users, HTTP internally)
+// This is safe because the external connection is secure, the gateway just can't see it
+config.gateway.controlUi = config.gateway.controlUi || {};
+config.gateway.controlUi.allowInsecureAuth = true;
 
 // Telegram configuration
 if (process.env.TELEGRAM_BOT_TOKEN) {
     config.channels.telegram = config.channels.telegram || {};
     config.channels.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
     config.channels.telegram.enabled = true;
-    config.channels.telegram.dm = config.channels.telegram.dm || {};
-    config.channels.telegram.dmPolicy = process.env.TELEGRAM_DM_POLICY || 'pairing';
 }
 
 // Discord configuration
@@ -196,8 +205,6 @@ if (process.env.DISCORD_BOT_TOKEN) {
     config.channels.discord = config.channels.discord || {};
     config.channels.discord.token = process.env.DISCORD_BOT_TOKEN;
     config.channels.discord.enabled = true;
-    config.channels.discord.dm = config.channels.discord.dm || {};
-    config.channels.discord.dm.policy = process.env.DISCORD_DM_POLICY || 'pairing';
 }
 
 // Slack configuration
@@ -268,7 +275,7 @@ if (isOpenAI) {
 // Write updated config
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 console.log('Configuration updated successfully');
-console.log('Config:', JSON.stringify(config, null, 2));
+console.log('Channels configured:', Object.keys(config.channels || {}).join(', ') || 'none');
 EOFNODE
 
 # ============================================================

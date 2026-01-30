@@ -32,13 +32,14 @@
   "build": {
     "command": "npm run build",
   },
-  // Container configuration for the Moltbot sandbox
+  // Container configuration for OpenClaw sandboxes
+  // Each user gets their own sandbox instance (openclaw-{userId})
   "containers": [
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
       "instance_type": "standard-4",
-      "max_instances": 1,
+      "max_instances": 10,
     },
   ],
   "durable_objects": {
@@ -62,30 +63,40 @@
       "bucket_name": "moltbot-data",
     },
   ],
-  // Cron trigger to sync moltbot data to R2 every 5 minutes
+  // Cron trigger to sync all user data to R2 every 1 minute
   "triggers": {
-    "crons": ["*/5 * * * *"],
+    "crons": ["* * * * *"],
   },
   // Browser Rendering binding for CDP shim
   "browser": {
     "binding": "BROWSER",
   },
   // Note: CF_ACCOUNT_ID should be set via `wrangler secret put CF_ACCOUNT_ID`
-  // Secrets to configure via `wrangler secret put`:
-  // - ANTHROPIC_API_KEY: Your Anthropic API key
-  // - CF_ACCESS_TEAM_DOMAIN: Cloudflare Access team domain
-  // - CF_ACCESS_AUD: Cloudflare Access application audience
-  // - TELEGRAM_BOT_TOKEN: (optional) Telegram bot token
-  // - DISCORD_BOT_TOKEN: (optional) Discord bot token
-  // - SLACK_BOT_TOKEN: (optional) Slack bot token
-  // - SLACK_APP_TOKEN: (optional) Slack app token
-  // - MOLTBOT_GATEWAY_TOKEN: (optional) Token to protect gateway access, if unset device pairing will be used
-  // - CDP_SECRET: (optional) Shared secret for /cdp endpoint authentication
   //
-  // R2 persistent storage secrets (required for data persistence across sessions):
+  // Required secrets (set via `wrangler secret put`):
+  // - SUPABASE_JWT_SECRET: JWT secret from Supabase project settings
+  // - ANTHROPIC_API_KEY: Your Anthropic API key
+  // - MOLTBOT_GATEWAY_TOKEN: Token to protect gateway access
+  //
+  // Optional Supabase secrets:
+  // - SUPABASE_URL: Supabase project URL (for issuer validation)
+  // - SUPABASE_PROJECT_REF: Supabase project reference ID
+  //
+  // Optional bot integration secrets:
+  // - TELEGRAM_BOT_TOKEN: Telegram bot token
+  // - DISCORD_BOT_TOKEN: Discord bot token
+  // - SLACK_BOT_TOKEN: Slack bot token
+  // - SLACK_APP_TOKEN: Slack app token
+  // - CDP_SECRET: Shared secret for /cdp endpoint authentication
+  //
+  // R2 persistent storage secrets (required for data persistence):
   // - R2_ACCESS_KEY_ID: R2 access key ID (from R2 API tokens)
   // - R2_SECRET_ACCESS_KEY: R2 secret access key (from R2 API tokens)
   // - CF_ACCOUNT_ID: Your Cloudflare account ID (for R2 endpoint URL)
+  //
+  // Deprecated (CF Access - replaced by Supabase auth):
+  // - CF_ACCESS_TEAM_DOMAIN
+  // - CF_ACCESS_AUD
   //
   // Secret bindings are automatically available via c.env.SECRET_NAME
 }

@@ -6,11 +6,16 @@ import {
   restartGateway,
   getStorageStatus,
   triggerSync,
+  getSecrets,
+  updateSecrets,
+  deleteSecret,
+  SECRET_LABELS,
   AuthError,
   type PendingDevice,
   type PairedDevice,
   type DeviceListResponse,
   type StorageStatusResponse,
+  type SecretsResponse,
 } from '../api'
 import './AdminPage.css'
 
@@ -28,6 +33,13 @@ export default function AdminPage() {
   const [actionInProgress, setActionInProgress] = useState<string | null>(null)
   const [restartInProgress, setRestartInProgress] = useState(false)
   const [syncInProgress, setSyncInProgress] = useState(false)
+
+  // Secrets management state
+  const [secretsData, setSecretsData] = useState<SecretsResponse | null>(null)
+  const [secretsLoading, setSecretsLoading] = useState(true)
+  const [secretInputs, setSecretInputs] = useState<Record<string, string>>({})
+  const [secretsSaving, setSecretsSaving] = useState(false)
+  const [secretsMessage, setSecretsMessage] = useState<string | null>(null)
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -62,10 +74,75 @@ export default function AdminPage() {
     }
   }, [])
 
+  const fetchSecrets = useCallback(async () => {
+    try {
+      setSecretsLoading(true)
+      const data = await getSecrets()
+      setSecretsData(data)
+      // Initialize inputs with empty strings (we don't show actual values)
+      setSecretInputs({})
+    } catch (err) {
+      console.error('Failed to fetch secrets:', err)
+    } finally {
+      setSecretsLoading(false)
+    }
+  }, [])
+
+  const handleSecretChange = (key: string, value: string) => {
+    setSecretInputs(prev => ({ ...prev, [key]: value }))
+    setSecretsMessage(null)
+  }
+
+  const handleSaveSecrets = async () => {
+    // Only send non-empty values
+    const toUpdate: Record<string, string> = {}
+    for (const [key, value] of Object.entries(secretInputs)) {
+      if (value.trim()) {
+        toUpdate[key] = value.trim()
+      }
+    }
+
+    if (Object.keys(toUpdate).length === 0) {
+      setSecretsMessage('No changes to save')
+      return
+    }
+
+    setSecretsSaving(true)
+    try {
+      const result = await updateSecrets(toUpdate)
+      setSecretsData(result)
+      setSecretInputs({}) // Clear inputs after save
+      setSecretsMessage(result.message || 'Secrets saved successfully')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save secrets')
+    } finally {
+      setSecretsSaving(false)
+    }
+  }
+
+  const handleDeleteSecret = async (key: string) => {
+    if (!confirm(`Are you sure you want to delete ${SECRET_LABELS[key]?.label || key}?`)) {
+      return
+    }
+
+    try {
+      const result = await deleteSecret(key)
+      if (result.success) {
+        await fetchSecrets()
+        setSecretsMessage(result.message || 'Secret deleted')
+      } else {
+        setError(result.error || 'Failed to delete secret')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete secret')
+    }
+  }
+
   useEffect(() => {
     fetchDevices()
     fetchStorageStatus()
-  }, [fetchDevices, fetchStorageStatus])
+    fetchSecrets()
+  }, [fetchDevices, fetchStorageStatus, fetchSecrets])
 
   const handleApprove = async (requestId: string) => {
     setActionInProgress(requestId)
@@ -234,6 +311,76 @@ export default function AdminPage() {
           Restart the gateway to apply configuration changes or recover from errors.
           All connected clients will be temporarily disconnected.
         </p>
+      </section>
+
+      <section className="devices-section secrets-section">
+        <div className="section-header">
+          <h2>Bot Configuration</h2>
+          <button
+            className="btn btn-primary"
+            onClick={handleSaveSecrets}
+            disabled={secretsSaving || Object.keys(secretInputs).length === 0}
+          >
+            {secretsSaving && <ButtonSpinner />}
+            {secretsSaving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+        <p className="hint">
+          Configure your bot tokens to enable Telegram, Discord, or Slack integration.
+          After saving, restart the gateway to apply changes.
+        </p>
+
+        {secretsMessage && (
+          <div className="info-banner">
+            {secretsMessage}
+          </div>
+        )}
+
+        {secretsLoading ? (
+          <div className="loading">
+            <div className="spinner"></div>
+            <p>Loading configuration...</p>
+          </div>
+        ) : (
+          <div className="secrets-grid">
+            {Object.entries(SECRET_LABELS).map(([key, { label, hint }]) => {
+              const isConfigured = secretsData?.configured.includes(key)
+              const maskedValue = secretsData?.secrets[key]
+              const currentInput = secretInputs[key] || ''
+
+              return (
+                <div key={key} className="secret-card">
+                  <div className="secret-header">
+                    <label htmlFor={key}>{label}</label>
+                    {isConfigured && (
+                      <span className="secret-badge configured">Configured</span>
+                    )}
+                  </div>
+                  <p className="secret-hint">{hint}</p>
+                  <div className="secret-input-row">
+                    <input
+                      type="password"
+                      id={key}
+                      placeholder={isConfigured ? `Current: ${maskedValue}` : 'Not configured'}
+                      value={currentInput}
+                      onChange={(e) => handleSecretChange(key, e.target.value)}
+                      autoComplete="off"
+                    />
+                    {isConfigured && (
+                      <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => handleDeleteSecret(key)}
+                        title="Delete this secret"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </section>
 
       {loading ? (

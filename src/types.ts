@@ -17,7 +17,7 @@ export interface MoltbotEnv {
   MOLTBOT_GATEWAY_TOKEN?: string; // Gateway token (mapped to CLAWDBOT_GATEWAY_TOKEN for container)
 
   CLAWDBOT_BIND_MODE?: string;
-  DEV_MODE?: string; // Set to 'true' for local dev (skips CF Access auth + moltbot device pairing)
+  DEV_MODE?: string; // Set to 'true' for local dev (skips auth + moltbot device pairing)
   DEBUG_ROUTES?: string; // Set to 'true' to enable /debug/* routes
   SANDBOX_SLEEP_AFTER?: string; // How long before sandbox sleeps: 'never' (default), or duration like '10m', '1h'
   TELEGRAM_BOT_TOKEN?: string;
@@ -26,9 +26,17 @@ export interface MoltbotEnv {
   DISCORD_DM_POLICY?: string;
   SLACK_BOT_TOKEN?: string;
   SLACK_APP_TOKEN?: string;
-  // Cloudflare Access configuration for admin routes
+
+  // Supabase authentication (OpenClaw platform)
+  SUPABASE_URL?: string; // e.g., 'https://xxx.supabase.co'
+  SUPABASE_ANON_KEY?: string; // Public anon key for client-side auth
+  SUPABASE_JWT_SECRET?: string; // JWT secret for verifying tokens
+  SUPABASE_PROJECT_REF?: string; // Project reference ID
+
+  // Legacy: Cloudflare Access configuration (deprecated in OpenClaw)
   CF_ACCESS_TEAM_DOMAIN?: string; // e.g., 'myteam.cloudflareaccess.com'
   CF_ACCESS_AUD?: string; // Application Audience (AUD) tag
+
   // R2 credentials for bucket mounting (set via wrangler secret)
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
@@ -37,14 +45,33 @@ export interface MoltbotEnv {
   BROWSER?: Fetcher;
   CDP_SECRET?: string; // Shared secret for CDP endpoint authentication
   WORKER_URL?: string; // Public URL of the worker (for CDP endpoint)
+
+  // Admin configuration
+  ADMIN_USER_IDS?: string; // Comma-separated list of user IDs who can access admin debug endpoints
 }
 
 /**
- * Authenticated user from Cloudflare Access
+ * Legacy: Authenticated user from Cloudflare Access
+ * @deprecated Use AuthenticatedUser instead
  */
 export interface AccessUser {
   email: string;
   name?: string;
+}
+
+/**
+ * Authenticated user for OpenClaw platform
+ * Contains user identity and routing information
+ */
+export interface AuthenticatedUser {
+  /** User's unique ID (UUID from Supabase) */
+  id: string;
+  /** User's email address */
+  email?: string;
+  /** Sandbox name for this user (e.g., 'openclaw-{userId}') */
+  sandboxName: string;
+  /** R2 prefix for this user's data (e.g., 'users/{userId}') */
+  r2Prefix: string;
 }
 
 /**
@@ -54,6 +81,9 @@ export type AppEnv = {
   Bindings: MoltbotEnv;
   Variables: {
     sandbox: Sandbox;
+    /** Current authenticated user (OpenClaw platform) */
+    user?: AuthenticatedUser;
+    /** Legacy: Cloudflare Access user (deprecated) */
     accessUser?: AccessUser;
   };
 };

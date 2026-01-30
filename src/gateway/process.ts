@@ -1,8 +1,33 @@
 import type { Sandbox, Process } from '@cloudflare/sandbox';
 import type { MoltbotEnv } from '../types';
 import { MOLTBOT_PORT, STARTUP_TIMEOUT_MS } from '../config';
-import { buildEnvVars } from './env';
+import { buildEnvVars, deriveUserGatewayToken } from './env';
 import { mountR2Storage } from './r2';
+
+/**
+ * Load user-specific secrets from R2
+ * These are stored at users/{userId}/secrets.json
+ */
+async function loadUserSecrets(env: MoltbotEnv, userId: string): Promise<Record<string, string>> {
+  try {
+    const secretsKey = `users/${userId}/secrets.json`;
+    const object = await env.MOLTBOT_BUCKET.get(secretsKey);
+
+    if (!object) {
+      console.log(`[Secrets] No user secrets found for ${userId.slice(0, 8)}...`);
+      return {};
+    }
+
+    const text = await object.text();
+    const secrets = JSON.parse(text) as Record<string, string>;
+    const keys = Object.keys(secrets).filter(k => secrets[k]);
+    console.log(`[Secrets] Loaded ${keys.length} secrets for user ${userId.slice(0, 8)}...: ${keys.join(', ')}`);
+    return secrets;
+  } catch (err) {
+    console.error(`[Secrets] Failed to load user secrets:`, err);
+    return {};
+  }
+}
 
 /**
  * Find an existing Moltbot gateway process
@@ -37,17 +62,18 @@ export async function findExistingMoltbotProcess(sandbox: Sandbox): Promise<Proc
 
 /**
  * Ensure the Moltbot gateway is running
- * 
+ *
  * This will:
  * 1. Mount R2 storage if configured
  * 2. Check for an existing gateway process
  * 3. Wait for it to be ready, or start a new one
- * 
+ *
  * @param sandbox - The sandbox instance
  * @param env - Worker environment bindings
+ * @param userId - Optional user ID for per-user token derivation (multi-tenant mode)
  * @returns The running gateway process
  */
-export async function ensureMoltbotGateway(sandbox: Sandbox, env: MoltbotEnv): Promise<Process> {
+export async function ensureMoltbotGateway(sandbox: Sandbox, env: MoltbotEnv, userId?: string): Promise<Process> {
   // Mount R2 storage for persistent data (non-blocking if not configured)
   // R2 is used as a backup - the startup script will restore from it on boot
   await mountR2Storage(sandbox, env);
@@ -76,9 +102,32 @@ export async function ensureMoltbotGateway(sandbox: Sandbox, env: MoltbotEnv): P
     }
   }
 
+  // Derive per-user gateway token if userId provided
+  let userGatewayToken: string | undefined;
+  if (userId && env.MOLTBOT_GATEWAY_TOKEN) {
+    userGatewayToken = await deriveUserGatewayToken(env.MOLTBOT_GATEWAY_TOKEN, userId);
+    console.log(`[Gateway] Derived per-user token for user ${userId.slice(0, 8)}...`);
+  }
+
+  // Load user-specific secrets from R2
+  let userSecrets: Record<string, string> = {};
+  if (userId) {
+    userSecrets = await loadUserSecrets(env, userId);
+  }
+
   // Start a new Moltbot gateway
   console.log('Starting new Moltbot gateway...');
-  const envVars = buildEnvVars(env);
+  const envVars = buildEnvVars(env, userGatewayToken);
+
+  // Merge user secrets into env vars (user secrets override worker secrets)
+  // This allows users to configure their own bot tokens
+  if (userSecrets.TELEGRAM_BOT_TOKEN) envVars.TELEGRAM_BOT_TOKEN = userSecrets.TELEGRAM_BOT_TOKEN;
+  if (userSecrets.DISCORD_BOT_TOKEN) envVars.DISCORD_BOT_TOKEN = userSecrets.DISCORD_BOT_TOKEN;
+  if (userSecrets.SLACK_BOT_TOKEN) envVars.SLACK_BOT_TOKEN = userSecrets.SLACK_BOT_TOKEN;
+  if (userSecrets.SLACK_APP_TOKEN) envVars.SLACK_APP_TOKEN = userSecrets.SLACK_APP_TOKEN;
+  if (userSecrets.ANTHROPIC_API_KEY) envVars.ANTHROPIC_API_KEY = userSecrets.ANTHROPIC_API_KEY;
+  if (userSecrets.OPENAI_API_KEY) envVars.OPENAI_API_KEY = userSecrets.OPENAI_API_KEY;
+
   const command = '/usr/local/bin/start-moltbot.sh';
 
   console.log('Starting process with command:', command);

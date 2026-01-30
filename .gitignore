@@ -36,3 +36,4 @@ Thumbs.db
 
 # Docker build artifacts
 *.tar
+supabase/.temp/
