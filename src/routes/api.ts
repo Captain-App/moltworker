@@ -175,6 +175,18 @@ adminApi.post('/devices/approve-all', async (c) => {
 // GET /api/admin/storage - Get R2 storage status and last sync time
 adminApi.get('/storage', async (c) => {
   const sandbox = c.get('sandbox');
+  
+  // DEBUG: Check what's in c.env
+  const envKeys = Object.keys(c.env).sort();
+  const debugInfo = {
+    envKeys,
+    r2KeyExists: 'R2_ACCESS_KEY_ID' in c.env,
+    r2SecretExists: 'R2_SECRET_ACCESS_KEY' in c.env,
+    cfAccountExists: 'CF_ACCOUNT_ID' in c.env,
+    r2KeyValue: c.env.R2_ACCESS_KEY_ID ? c.env.R2_ACCESS_KEY_ID.substring(0, 4) + '...' : null,
+    r2SecretValue: c.env.R2_SECRET_ACCESS_KEY ? c.env.R2_SECRET_ACCESS_KEY.substring(0, 4) + '...' : null,
+  };
+  
   const hasCredentials = !!(
     c.env.R2_ACCESS_KEY_ID && 
     c.env.R2_SECRET_ACCESS_KEY && 
@@ -212,6 +224,7 @@ adminApi.get('/storage', async (c) => {
     configured: hasCredentials,
     missing: missing.length > 0 ? missing : undefined,
     lastSync,
+    debug: debugInfo,
     message: hasCredentials 
       ? 'R2 storage is configured. Your data will persist across container restarts.'
       : 'R2 storage is not configured. Paired devices and conversations will be lost when the container restarts.',
