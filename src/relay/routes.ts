@@ -460,40 +460,41 @@ authenticatedRelay.get('/poll', async (c) => {
   }
 
   // List messages from KV for this group
-  // Use cursor-based pagination to get ALL keys, then filter and return newest
+  // KV list returns in ascending order (oldest first due to padded timestamps in keys)
   const prefix = RelayKV.messagePrefixByGroup(groupId);
-
-  // Get all keys (paginate through the full list)
-  let allKeys: { name: string }[] = [];
-  let cursor: string | undefined = undefined;
-  do {
-    const listResult = await c.env.RELAY.list({ prefix, cursor, limit: 1000 });
-    allKeys.push(...listResult.keys);
-    cursor = listResult.list_complete ? undefined : listResult.cursor;
-  } while (cursor);
   
-  // Sort descending (newest first) and take what we need
-  allKeys.sort((a, b) => b.name.localeCompare(a.name));
+  // Paginate through keys to find ones after 'since' timestamp
+  // This is necessary because KV doesn't support "start_after" for keys
+  let allRelevantKeys: { name: string }[] = [];
+  let cursor: string | undefined = undefined;
+  const sincePadded = String(since).padStart(15, '0');
+  
+  // Paginate until we have enough relevant keys or exhaust the list
+  do {
+    const listResult = await c.env.RELAY.list({ prefix, cursor, limit: 500 });
+    
+    // Filter keys by timestamp embedded in key name
+    for (const key of listResult.keys) {
+      const parts = key.name.split(':');
+      const keyTimestamp = parts[3]; // Already padded
+      if (keyTimestamp > sincePadded) {
+        allRelevantKeys.push(key);
+        if (allRelevantKeys.length >= limit + 50) break; // Got enough
+      }
+    }
+    
+    cursor = listResult.list_complete ? undefined : listResult.cursor;
+  } while (cursor && allRelevantKeys.length < limit + 50);
 
   const messages: RelayMessage[] = [];
   let maxTimestamp = since;
-  let checkedCount = 0;
 
-  for (const key of allKeys) {
-    checkedCount++;
-    
-    // Skip messages from the requesting bot (they don't need their own messages)
+  for (const key of allRelevantKeys) {
     const msgData = await c.env.RELAY.get(key.name, 'json') as RelayMessage | null;
     if (!msgData) continue;
 
     // Filter out own messages (unless includeSelf=true for debugging)
     if (!includeSelf && msgData.botId === relayAuth.botId) continue;
-
-    // Filter messages that are at or before the 'since' timestamp (already seen)
-    if (msgData.timestamp <= since) {
-      // Since we're iterating newest-first and hit an old message, we can stop
-      break;
-    }
 
     messages.push(msgData);
     maxTimestamp = Math.max(maxTimestamp, msgData.timestamp);
@@ -501,7 +502,7 @@ authenticatedRelay.get('/poll', async (c) => {
     if (messages.length >= limit) break;
   }
 
-  // Sort by timestamp ascending for return (newest at end)
+  // Sort by timestamp ascending
   messages.sort((a, b) => a.timestamp - b.timestamp);
 
   console.log(
