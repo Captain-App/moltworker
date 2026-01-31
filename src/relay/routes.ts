@@ -404,15 +404,21 @@ authenticatedRelay.post('/broadcast', async (c) => {
   // Write to KV with TTL
   // Key format ensures messages are sorted by timestamp when listed
   const msgKey = RelayKV.messageKey(groupId, timestamp, messageId);
-  await c.env.RELAY.put(msgKey, JSON.stringify(message), {
-    expirationTtl: RelayTTL.MESSAGE,
-  });
-
-  console.log(
-    `[RELAY] Broadcast: bot=${relayAuth.botId} group=${groupId} msg=${messageId} text="${text?.slice(0, 50)}..."`
-  );
-
-  return c.json<BroadcastResponse>({ ok: true });
+  
+  try {
+    await c.env.RELAY.put(msgKey, JSON.stringify(message), {
+      expirationTtl: RelayTTL.MESSAGE,
+    });
+    
+    console.log(
+      `[RELAY] Broadcast OK: bot=${relayAuth.botId} group=${groupId} key=${msgKey} text="${text?.slice(0, 50)}..."`
+    );
+    
+    return c.json<BroadcastResponse>({ ok: true });
+  } catch (e) {
+    console.error(`[RELAY] Broadcast KV error: ${e}`);
+    return c.json<BroadcastResponse>({ ok: false, error: 'KV write failed' }, 500);
+  }
 });
 
 // ----------------------------------------------------------------------------
@@ -454,16 +460,28 @@ authenticatedRelay.get('/poll', async (c) => {
   }
 
   // List messages from KV for this group
-  // KV list returns keys in lexicographic order, and since timestamps are zero-padded,
-  // this means messages are naturally sorted by timestamp
+  // Use cursor-based pagination to get ALL keys, then filter and return newest
   const prefix = RelayKV.messagePrefixByGroup(groupId);
 
-  const listResult = await c.env.RELAY.list({ prefix, limit: limit + 100 }); // Extra to account for filtering
+  // Get all keys (paginate through the full list)
+  let allKeys: { name: string }[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const listResult = await c.env.RELAY.list({ prefix, cursor, limit: 1000 });
+    allKeys.push(...listResult.keys);
+    cursor = listResult.list_complete ? undefined : listResult.cursor;
+  } while (cursor);
+  
+  // Sort descending (newest first) and take what we need
+  allKeys.sort((a, b) => b.name.localeCompare(a.name));
 
   const messages: RelayMessage[] = [];
   let maxTimestamp = since;
+  let checkedCount = 0;
 
-  for (const key of listResult.keys) {
+  for (const key of allKeys) {
+    checkedCount++;
+    
     // Skip messages from the requesting bot (they don't need their own messages)
     const msgData = await c.env.RELAY.get(key.name, 'json') as RelayMessage | null;
     if (!msgData) continue;
@@ -471,8 +489,11 @@ authenticatedRelay.get('/poll', async (c) => {
     // Filter out own messages (unless includeSelf=true for debugging)
     if (!includeSelf && msgData.botId === relayAuth.botId) continue;
 
-    // Filter messages that are exactly at the 'since' timestamp (already seen)
-    if (msgData.timestamp <= since) continue;
+    // Filter messages that are at or before the 'since' timestamp (already seen)
+    if (msgData.timestamp <= since) {
+      // Since we're iterating newest-first and hit an old message, we can stop
+      break;
+    }
 
     messages.push(msgData);
     maxTimestamp = Math.max(maxTimestamp, msgData.timestamp);
@@ -480,7 +501,7 @@ authenticatedRelay.get('/poll', async (c) => {
     if (messages.length >= limit) break;
   }
 
-  // Sort by timestamp ascending
+  // Sort by timestamp ascending for return (newest at end)
   messages.sort((a, b) => a.timestamp - b.timestamp);
 
   console.log(
@@ -513,6 +534,31 @@ authenticatedRelay.get('/memberships', async (c) => {
   }
 
   return c.json({ memberships });
+});
+
+// Debug endpoint to check KV keys
+authenticatedRelay.get('/debug/keys', async (c) => {
+  const relayAuth = c.get('relayAuth')!;
+  const groupId = c.req.query('groupId');
+  
+  if (!groupId) {
+    return c.json({ error: 'groupId required' }, 400);
+  }
+  
+  const prefix = RelayKV.messagePrefixByGroup(groupId);
+  const listResult = await c.env.RELAY.list({ prefix, limit: 1000 });
+  
+  // Get all keys and sort to show newest
+  const allKeys = listResult.keys.map(k => k.name);
+  allKeys.sort().reverse(); // Reverse to get newest first
+  
+  return c.json({
+    prefix,
+    totalKeys: allKeys.length,
+    newestKeys: allKeys.slice(0, 10),
+    oldestKeys: allKeys.slice(-10),
+    listComplete: listResult.list_complete,
+  });
 });
 
 // Mount authenticated routes
