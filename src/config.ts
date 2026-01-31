@@ -14,6 +14,16 @@ export const R2_MOUNT_PATH = '/data/openclaw';
 /** R2 bucket name for persistent storage */
 export const R2_BUCKET_NAME = 'moltbot-data';
 
+/** Health check configuration */
+export const HEALTH_CHECK_CONFIG = {
+  /** Number of consecutive failures before auto-restart */
+  failuresBeforeRestart: 3,
+  /** Timeout for port check in ms */
+  portCheckTimeoutMs: 5000,
+  /** Timeout for HTTP check in ms */
+  httpCheckTimeoutMs: 10000,
+};
+
 /**
  * Get the R2 mount path for a specific user.
  * @param r2Prefix - The user's R2 prefix (e.g., 'users/{userId}')

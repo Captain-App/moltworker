@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { syncToR2 } from './sync';
-import { 
-  createMockEnv, 
-  createMockEnvWithR2, 
-  createMockProcess, 
-  createMockSandbox, 
-  suppressConsole 
+import {
+  createMockEnv,
+  createMockEnvWithR2,
+  createMockProcess,
+  createMockSandbox,
+  suppressConsole
 } from '../test-utils';
 
 describe('syncToR2', () => {
@@ -22,19 +22,21 @@ describe('syncToR2', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('R2 storage is not configured');
+      expect(result.syncId).toBeDefined(); // Should still have syncId
     });
 
     it('returns error when mount fails', async () => {
       const { sandbox, startProcessMock, mountBucketMock } = createMockSandbox();
       startProcessMock.mockResolvedValue(createMockProcess(''));
       mountBucketMock.mockRejectedValue(new Error('Mount failed'));
-      
+
       const env = createMockEnvWithR2();
 
       const result = await syncToR2(sandbox, env);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Failed to mount R2 storage');
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -44,7 +46,7 @@ describe('syncToR2', () => {
       startProcessMock
         .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
         .mockResolvedValueOnce(createMockProcess('')); // No "ok" output
-      
+
       const env = createMockEnvWithR2();
 
       const result = await syncToR2(sandbox, env);
@@ -60,61 +62,134 @@ describe('syncToR2', () => {
     it('returns success when sync completes', async () => {
       const { sandbox, startProcessMock } = createMockSandbox();
       const timestamp = '2026-01-27T12:00:00+00:00';
-      
-      // Calls: mount check, sanity check, rsync, cat timestamp
+      let capturedSyncId = '';
+
+      // Calls: mount check, sanity check, file count before, rsync, verify sync ID, file count after
       startProcessMock
-        .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
+        .mockResolvedValueOnce(createMockProcess('s3fs on /data/openclaw type fuse.s3fs\n'))
         .mockResolvedValueOnce(createMockProcess('ok'))
-        .mockResolvedValueOnce(createMockProcess(''))
-        .mockResolvedValueOnce(createMockProcess(timestamp));
-      
+        .mockResolvedValueOnce(createMockProcess('15')) // file count before
+        .mockImplementationOnce((cmd: string) => {
+          // Capture the syncId from the rsync command
+          const match = cmd.match(/sync-\d+-[a-z0-9]+/);
+          capturedSyncId = match?.[0] || 'sync-test-123';
+          return Promise.resolve(createMockProcess('', { exitCode: 0 }));
+        })
+        .mockImplementationOnce((cmd: string) => {
+          // Return the captured syncId
+          return Promise.resolve(createMockProcess(`${capturedSyncId}|${timestamp}`));
+        })
+        .mockResolvedValueOnce(createMockProcess('15')); // file count after
+
       const env = createMockEnvWithR2();
 
       const result = await syncToR2(sandbox, env);
 
       expect(result.success).toBe(true);
       expect(result.lastSync).toBe(timestamp);
+      expect(result.syncId).toMatch(/^sync-\d+-[a-z0-9]+$/);
+      expect(result.rsyncExitCode).toBe(0);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
 
-    it('returns error when rsync fails (no timestamp created)', async () => {
+    it('returns error when rsync fails with non-zero exit code', async () => {
       const { sandbox, startProcessMock } = createMockSandbox();
-      
-      // Calls: mount check, sanity check, rsync (fails), cat timestamp (empty)
+
+      // Calls: mount check, sanity check, file count, rsync (fails), verify (wrong syncId)
       startProcessMock
         .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
         .mockResolvedValueOnce(createMockProcess('ok'))
-        .mockResolvedValueOnce(createMockProcess('', { exitCode: 1 }))
-        .mockResolvedValueOnce(createMockProcess(''));
-      
+        .mockResolvedValueOnce(createMockProcess('15'))
+        .mockResolvedValueOnce(createMockProcess('rsync error', { exitCode: 1, stderr: 'rsync error' }))
+        .mockResolvedValueOnce(createMockProcess('wrong-sync-id|2026-01-27T12:00:00+00:00'));
+
       const env = createMockEnvWithR2();
 
       const result = await syncToR2(sandbox, env);
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Sync failed');
+      expect(result.error).toBe('Sync verification failed');
+      expect(result.rsyncExitCode).toBe(1);
+    });
+
+    it('returns error when sync ID verification fails', async () => {
+      const { sandbox, startProcessMock } = createMockSandbox();
+
+      // Rsync succeeds but sync ID doesn't match (indicates write failed)
+      startProcessMock
+        .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
+        .mockResolvedValueOnce(createMockProcess('ok'))
+        .mockResolvedValueOnce(createMockProcess('15'))
+        .mockResolvedValueOnce(createMockProcess('', { exitCode: 0 }))
+        .mockResolvedValueOnce(createMockProcess('different-id|2026-01-27T12:00:00+00:00'));
+
+      const env = createMockEnvWithR2();
+
+      const result = await syncToR2(sandbox, env);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Sync verification failed');
     });
 
     it('verifies rsync command is called with correct flags', async () => {
       const { sandbox, startProcessMock } = createMockSandbox();
       const timestamp = '2026-01-27T12:00:00+00:00';
-      
+
       startProcessMock
         .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
         .mockResolvedValueOnce(createMockProcess('ok'))
-        .mockResolvedValueOnce(createMockProcess(''))
-        .mockResolvedValueOnce(createMockProcess(timestamp));
-      
+        .mockResolvedValueOnce(createMockProcess('15'))
+        .mockImplementationOnce((cmd: string) => {
+          // Return process with the syncId from the command
+          return Promise.resolve(createMockProcess('', { exitCode: 0 }));
+        })
+        .mockImplementationOnce((cmd: string) => {
+          // Extract syncId from previous command and return it
+          const syncIdMatch = startProcessMock.mock.calls[3]?.[0]?.match(/sync-\d+-[a-z0-9]+/);
+          const syncId = syncIdMatch?.[0] || 'sync-test-123';
+          return Promise.resolve(createMockProcess(`${syncId}|${timestamp}`));
+        })
+        .mockResolvedValueOnce(createMockProcess('15'));
+
       const env = createMockEnvWithR2();
 
       await syncToR2(sandbox, env);
 
-      // Third call should be rsync (paths still use clawdbot internally)
-      const rsyncCall = startProcessMock.mock.calls[2][0];
+      // Fourth call should be rsync (paths still use clawdbot internally)
+      const rsyncCall = startProcessMock.mock.calls[3][0];
       expect(rsyncCall).toContain('rsync');
       expect(rsyncCall).toContain('--no-times');
       expect(rsyncCall).toContain('--delete');
       expect(rsyncCall).toContain('/root/.clawdbot/');
-      expect(rsyncCall).toContain('/data/moltbot/');
+      expect(rsyncCall).toContain('/data/openclaw/');
+      // Should include sync ID in the timestamp file
+      expect(rsyncCall).toMatch(/echo "sync-\d+-[a-z0-9]+\|/);
+    });
+
+    it('includes file count in successful result', async () => {
+      const { sandbox, startProcessMock } = createMockSandbox();
+      const timestamp = '2026-01-27T12:00:00+00:00';
+
+      startProcessMock
+        .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
+        .mockResolvedValueOnce(createMockProcess('ok'))
+        .mockResolvedValueOnce(createMockProcess('25')) // file count before
+        .mockImplementationOnce((cmd: string) => {
+          return Promise.resolve(createMockProcess('', { exitCode: 0 }));
+        })
+        .mockImplementationOnce((cmd: string) => {
+          const syncIdMatch = startProcessMock.mock.calls[3]?.[0]?.match(/sync-\d+-[a-z0-9]+/);
+          const syncId = syncIdMatch?.[0] || 'sync-test-123';
+          return Promise.resolve(createMockProcess(`${syncId}|${timestamp}`));
+        })
+        .mockResolvedValueOnce(createMockProcess('25')); // file count after
+
+      const env = createMockEnvWithR2();
+
+      const result = await syncToR2(sandbox, env);
+
+      expect(result.success).toBe(true);
+      expect(result.fileCount).toBe(25);
     });
   });
 });

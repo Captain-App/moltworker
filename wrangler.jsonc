@@ -38,8 +38,8 @@
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
-      "instance_type": "standard-4",
-      "max_instances": 10,
+      "instance_type": "standard-1",
+      "max_instances": 20,
     },
   ],
   "durable_objects": {
@@ -63,6 +63,17 @@
       "bucket_name": "moltbot-data",
     },
   ],
+  // D1 database for platform issues tracking
+  // Create with: wrangler d1 create moltworker-platform
+  // Apply migrations with: wrangler d1 migrations apply moltworker-platform
+  "d1_databases": [
+    {
+      "binding": "PLATFORM_DB",
+      "database_name": "moltworker-platform",
+      "database_id": "f3a07958-df87-4465-bab3-3f8e67ea7418",
+      "migrations_dir": "migrations",
+    },
+  ],
   // Cron trigger to sync all user data to R2 every 1 minute
   "triggers": {
     "crons": ["* * * * *"],
@@ -76,7 +87,7 @@
   // Required secrets (set via `wrangler secret put`):
   // - SUPABASE_JWT_SECRET: JWT secret from Supabase project settings
   // - ANTHROPIC_API_KEY: Your Anthropic API key
-  // - MOLTBOT_GATEWAY_TOKEN: Token to protect gateway access
+  // - MOLTBOT_GATEWAY_MASTER_TOKEN: Token to protect gateway access
   //
   // Optional Supabase secrets:
   // - SUPABASE_URL: Supabase project URL (for issuer validation)

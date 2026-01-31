@@ -1,4 +1,5 @@
 import type { Sandbox } from '@cloudflare/sandbox';
+import type { D1Database } from './monitoring';
 
 /**
  * Environment bindings for the Moltbot Worker
@@ -7,6 +8,7 @@ export interface MoltbotEnv {
   Sandbox: DurableObjectNamespace<Sandbox>;
   ASSETS: Fetcher; // Assets binding for admin UI static files
   MOLTBOT_BUCKET: R2Bucket; // R2 bucket for persistent storage
+  PLATFORM_DB?: D1Database; // D1 database for platform issues tracking
   // AI Gateway configuration (preferred)
   AI_GATEWAY_API_KEY?: string; // API key for the provider configured in AI Gateway
   AI_GATEWAY_BASE_URL?: string; // AI Gateway URL (e.g., https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic)
@@ -14,7 +16,8 @@ export interface MoltbotEnv {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_BASE_URL?: string;
   OPENAI_API_KEY?: string;
-  MOLTBOT_GATEWAY_TOKEN?: string; // Gateway token (mapped to CLAWDBOT_GATEWAY_TOKEN for container)
+  MOLTBOT_GATEWAY_MASTER_TOKEN?: string; // Gateway master token (derives per-user tokens)
+  MOLTBOT_GATEWAY_TOKEN?: string; // @deprecated - use MOLTBOT_GATEWAY_MASTER_TOKEN
 
   CLAWDBOT_BIND_MODE?: string;
   DEV_MODE?: string; // Set to 'true' for local dev (skips auth + moltbot device pairing)
@@ -31,6 +34,7 @@ export interface MoltbotEnv {
   SUPABASE_URL?: string; // e.g., 'https://xxx.supabase.co'
   SUPABASE_ANON_KEY?: string; // Public anon key for client-side auth
   SUPABASE_JWT_SECRET?: string; // JWT secret for verifying tokens
+  SUPABASE_SERVICE_ROLE_KEY?: string; // Service role key for admin operations (read auth.users)
   SUPABASE_PROJECT_REF?: string; // Project reference ID
 
   // Legacy: Cloudflare Access configuration (deprecated in OpenClaw)

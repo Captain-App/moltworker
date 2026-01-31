@@ -1,7 +1,27 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
-import { ensureMoltbotGateway, findExistingMoltbotProcess, mountR2Storage, syncToR2, waitForProcess, deriveUserGatewayToken } from '../gateway';
+import {
+  ensureMoltbotGateway,
+  findExistingMoltbotProcess,
+  mountR2Storage,
+  syncToR2,
+  waitForProcess,
+  deriveUserGatewayToken,
+  getGatewayMasterToken,
+  getAllHealthStates,
+  getRecentSyncResults,
+} from '../gateway';
 import { R2_MOUNT_PATH, getR2MountPathForUser } from '../config';
+import {
+  getUnresolvedIssues,
+  getRecentIssues,
+  getIssue,
+  resolveIssue,
+  getIssueCounts,
+  createIssue,
+  cleanupOldIssues,
+  getRecentEvents,
+} from '../monitoring';
 
 // CLI commands can take 10-15 seconds to complete due to WebSocket connection overhead
 const CLI_TIMEOUT_MS = 20000;
@@ -19,7 +39,245 @@ const api = new Hono<AppEnv>();
  */
 const adminApi = new Hono<AppEnv>();
 
-// Note: Auth is handled by the Supabase middleware in index.ts before these routes are reached
+// Helper: Check if requester is admin
+function isAdminRequest(c: any): boolean {
+  const user = c.get('user');
+  const devMode = c.env.DEV_MODE === 'true';
+  const adminIds = c.env.ADMIN_USER_IDS?.split(',') || [];
+  
+  // Also allow access via admin secret header (for service role operations)
+  const adminSecret = c.req.header('X-Admin-Secret');
+  const expectedSecret = getGatewayMasterToken(c.env);
+  const secretAuth = !!adminSecret && adminSecret === expectedSecret;
+  
+  return devMode || secretAuth || (user?.id && adminIds.includes(user.id));
+}
+
+// GET /api/admin/users - List all users from Supabase auth
+adminApi.get('/users', async (c) => {
+  // Direct secret check at endpoint level (bypasses middleware auth)
+  const adminSecret = c.req.header('X-Admin-Secret');
+  const expectedSecret = getGatewayMasterToken(c.env);
+  const user = c.get('user');
+  const devMode = c.env.DEV_MODE === 'true';
+  const adminIds = c.env.ADMIN_USER_IDS?.split(',') || [];
+  const isAdmin = devMode || (adminSecret && adminSecret === expectedSecret) || (user?.id && adminIds.includes(user.id));
+  
+  if (!isAdmin) {
+    return c.json({ error: 'Admin access required', hasSecret: !!adminSecret, hasUser: !!user }, 403);
+  }
+
+  try {
+    // Query Supabase auth.users via REST
+    const supabaseUrl = c.env.SUPABASE_URL || 'https://kjbcjkihxskuwwfdqklt.supabase.co';
+    const serviceRoleKey = c.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    if (!serviceRoleKey) {
+      return c.json({ error: 'SUPABASE_SERVICE_ROLE_KEY not configured' }, 500);
+    }
+
+    const response = await fetch(`${supabaseUrl}/rest/v1/profiles?select=id,username,full_name,created_at&order=created_at.desc&limit=100`, {
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      return c.json({ error: 'Failed to fetch users', status: response.status }, 500);
+    }
+
+    const profiles = await response.json();
+    
+    // Check which users have sandboxes
+    const usersWithSandboxes = await Promise.all(
+      profiles.map(async (profile: any) => {
+        const sandboxName = `openclaw-${profile.id}`;
+        try {
+          const { getSandbox } = await import('@cloudflare/sandbox');
+          const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+          // Try to list processes to see if sandbox exists
+          const processes = await sandbox.listProcesses();
+          return {
+            ...profile,
+            sandbox: {
+              name: sandboxName,
+              active: processes.length > 0,
+              processes: processes.length,
+            },
+          };
+        } catch (e) {
+          return {
+            ...profile,
+            sandbox: { name: sandboxName, active: false, error: 'not_found' },
+          };
+        }
+      })
+    );
+
+    return c.json({
+      users: usersWithSandboxes,
+      count: usersWithSandboxes.length,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/users/search - Search users by email/name
+adminApi.get('/users/search', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const query = c.req.query('q');
+  if (!query) {
+    return c.json({ error: 'Query parameter q required' }, 400);
+  }
+
+  try {
+    const supabaseUrl = c.env.SUPABASE_URL || 'https://kjbcjkihxskuwwfdqklt.supabase.co';
+    const serviceRoleKey = c.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    if (!serviceRoleKey) {
+      return c.json({ error: 'SUPABASE_SERVICE_ROLE_KEY not configured' }, 500);
+    }
+
+    // Search profiles by username or full_name
+    const response = await fetch(
+      `${supabaseUrl}/rest/v1/profiles?select=id,username,full_name,created_at&or=(username.ilike.*${query}*,full_name.ilike.*${query}*)&limit=20`,
+      {
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return c.json({ error: 'Search failed', status: response.status }, 500);
+    }
+
+    const profiles = await response.json();
+    return c.json({ users: profiles, count: profiles.length });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/users/:userId - Get user details with sandbox status
+adminApi.get('/users/:userId', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const userId = c.req.param('userId');
+  
+  try {
+    const supabaseUrl = c.env.SUPABASE_URL || 'https://kjbcjkihxskuwwfdqklt.supabase.co';
+    const serviceRoleKey = c.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    // Get profile
+    const profileRes = await fetch(
+      `${supabaseUrl}/rest/v1/profiles?select=*&id=eq.${userId}&limit=1`,
+      {
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    
+    const profiles = await profileRes.json();
+    const profile = profiles[0] || null;
+
+    // Get sandbox status
+    const sandboxName = `openclaw-${userId}`;
+    let sandboxStatus: any = { name: sandboxName, active: false };
+    
+    try {
+      const { getSandbox } = await import('@cloudflare/sandbox');
+      const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+      const processes = await sandbox.listProcesses();
+      sandboxStatus = {
+        name: sandboxName,
+        active: processes.length > 0,
+        processes: processes.map((p: any) => ({
+          id: p.id,
+          command: p.command,
+          status: p.status,
+          exitCode: p.exitCode,
+        })),
+      };
+    } catch (e) {
+      sandboxStatus.error = 'sandbox_not_found';
+    }
+
+    // Derive gateway token for this user
+    let gatewayToken: string | null = null;
+    const masterToken = getGatewayMasterToken(c.env);
+    if (masterToken) {
+      gatewayToken = await deriveUserGatewayToken(masterToken, userId);
+    }
+
+    return c.json({
+      user: profile,
+      userId,
+      sandbox: sandboxStatus,
+      gatewayToken: gatewayToken ? `${gatewayToken.slice(0, 8)}...` : null,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /api/admin/users/:userId/restart - Restart user's container
+adminApi.post('/users/:userId/restart', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const userId = c.req.param('userId');
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  
+  const sandboxName = `openclaw-${userId}`;
+  const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: true });
+
+  try {
+    // Kill all processes
+    const processes = await sandbox.listProcesses();
+    for (const proc of processes) {
+      try { await proc.kill(); } catch (e) { /* ignore */ }
+    }
+
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Clear locks
+    try {
+      await sandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null');
+    } catch (e) { /* ignore */ }
+
+    // Restart gateway
+    const bootPromise = ensureMoltbotGateway(sandbox, c.env, userId).catch(() => {});
+    c.executionCtx.waitUntil(bootPromise);
+
+    return c.json({
+      success: true,
+      message: 'Container restart initiated',
+      userId,
+      sandboxName,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
 
 // GET /api/admin/devices - List pending and paired devices
 adminApi.get('/devices', async (c) => {
@@ -686,6 +944,270 @@ adminApi.post('/users/:userId/reset', async (c) => {
   }
 });
 
+// GET /api/admin/users - List all users with active sandboxes (admin only, or dev mode)
+adminApi.get('/users', async (c) => {
+  // Allow in DEV_MODE or with admin access
+  const isDevMode = c.env.DEV_MODE === 'true';
+  const isAdmin = c.get('user')?.id && c.env.ADMIN_USER_IDS?.split(',').includes(c.get('user')!.id);
+  if (!isDevMode && !isAdmin) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  // List R2 storage for user data
+  try {
+    const bucket = c.env.MOLTBOT_BUCKET;
+    const users: Array<{ id: string; username?: string; full_name?: string; created_at?: string }> = [];
+    
+    // Try to list objects with users/ prefix
+    const listResult = await bucket.list({ prefix: 'users/' });
+    const userIds = new Set<string>();
+    
+    for (const obj of listResult.objects || []) {
+      const match = obj.key.match(/^users\/([^/]+)/);
+      if (match) {
+        userIds.add(match[1]);
+      }
+    }
+    
+    return c.json({
+      users: Array.from(userIds).map(id => ({ id })),
+      count: userIds.size,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// =============================================================================
+// Platform Dashboard & Issues (Admin only)
+// =============================================================================
+
+// GET /api/admin/dashboard - Platform health dashboard
+adminApi.get('/dashboard', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  try {
+    // Get health states
+    const healthStates = getAllHealthStates();
+    const healthSummary = {
+      totalTracked: healthStates.size,
+      healthy: 0,
+      unhealthy: 0,
+      recentRestarts: 0,
+    };
+
+    const now = Date.now();
+    const oneHourAgo = now - 60 * 60 * 1000;
+
+    for (const [_userId, state] of healthStates) {
+      if (state.consecutiveFailures === 0) {
+        healthSummary.healthy++;
+      } else {
+        healthSummary.unhealthy++;
+      }
+      if (state.lastRestart && new Date(state.lastRestart).getTime() > oneHourAgo) {
+        healthSummary.recentRestarts++;
+      }
+    }
+
+    // Get issue counts from D1 (if available)
+    let issueCounts: Record<string, { total: number; unresolved: number }> = {};
+    let unresolvedIssues: Array<unknown> = [];
+    if (c.env.PLATFORM_DB) {
+      issueCounts = await getIssueCounts(c.env.PLATFORM_DB);
+      unresolvedIssues = await getUnresolvedIssues(c.env.PLATFORM_DB, { limit: 10 });
+    }
+
+    // Get recent events
+    const recentEvents = getRecentEvents(20);
+
+    return c.json({
+      health: healthSummary,
+      issues: {
+        counts: issueCounts,
+        recentUnresolved: unresolvedIssues,
+      },
+      recentEvents,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/issues - List platform issues
+adminApi.get('/issues', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  if (!c.env.PLATFORM_DB) {
+    return c.json({ error: 'D1 database not configured' }, 503);
+  }
+
+  const resolved = c.req.query('resolved');
+  const userId = c.req.query('user_id');
+  const type = c.req.query('type');
+  const limit = parseInt(c.req.query('limit') || '50', 10);
+
+  try {
+    let issues;
+    if (resolved === 'false') {
+      issues = await getUnresolvedIssues(c.env.PLATFORM_DB, {
+        limit,
+        userId: userId || undefined,
+        type: type as any,
+      });
+    } else {
+      issues = await getRecentIssues(c.env.PLATFORM_DB, {
+        limit,
+        userId: userId || undefined,
+      });
+    }
+
+    return c.json({ issues, count: issues.length });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/issues/:id - Get a specific issue
+adminApi.get('/issues/:id', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  if (!c.env.PLATFORM_DB) {
+    return c.json({ error: 'D1 database not configured' }, 503);
+  }
+
+  const id = parseInt(c.req.param('id'), 10);
+  if (isNaN(id)) {
+    return c.json({ error: 'Invalid issue ID' }, 400);
+  }
+
+  try {
+    const issue = await getIssue(c.env.PLATFORM_DB, id);
+    if (!issue) {
+      return c.json({ error: 'Issue not found' }, 404);
+    }
+    return c.json({ issue });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /api/admin/issues/:id/resolve - Resolve an issue
+adminApi.post('/issues/:id/resolve', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  if (!c.env.PLATFORM_DB) {
+    return c.json({ error: 'D1 database not configured' }, 503);
+  }
+
+  const id = parseInt(c.req.param('id'), 10);
+  if (isNaN(id)) {
+    return c.json({ error: 'Invalid issue ID' }, 400);
+  }
+
+  const user = c.get('user');
+  const resolvedBy = user?.id || 'admin';
+
+  try {
+    const success = await resolveIssue(c.env.PLATFORM_DB, id, resolvedBy);
+    if (!success) {
+      return c.json({ error: 'Failed to resolve issue' }, 500);
+    }
+    return c.json({ success: true, issueId: id, resolvedBy });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /api/admin/issues - Create a new issue (for testing/manual logging)
+adminApi.post('/issues', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  if (!c.env.PLATFORM_DB) {
+    return c.json({ error: 'D1 database not configured' }, 503);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { type, severity, userId, message, details } = body;
+
+    if (!type || !severity || !message) {
+      return c.json({ error: 'Missing required fields: type, severity, message' }, 400);
+    }
+
+    const issueId = await createIssue(c.env.PLATFORM_DB, {
+      type,
+      severity,
+      userId,
+      message,
+      details,
+    });
+
+    if (!issueId) {
+      return c.json({ error: 'Failed to create issue' }, 500);
+    }
+
+    return c.json({ success: true, issueId });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /api/admin/issues/cleanup - Clean up old resolved issues
+adminApi.post('/issues/cleanup', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  if (!c.env.PLATFORM_DB) {
+    return c.json({ error: 'D1 database not configured' }, 503);
+  }
+
+  const days = parseInt(c.req.query('days') || '30', 10);
+
+  try {
+    const deleted = await cleanupOldIssues(c.env.PLATFORM_DB, days);
+    return c.json({ success: true, deleted, olderThanDays: days });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /api/admin/sync-history/:userId - Get sync history for a user
+adminApi.get('/sync-history/:userId', async (c) => {
+  if (!isAdminRequest(c)) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const userId = c.req.param('userId');
+  const r2Prefix = `users/${userId}`;
+  const results = getRecentSyncResults(r2Prefix);
+
+  return c.json({
+    userId,
+    syncResults: results,
+    count: results.length,
+  });
+});
+
 // GET /api/gateway-token - Exchange JWT for gateway token (authenticated users only)
 // The frontend calls this to get the token needed to connect to their gateway
 api.get('/gateway-token', async (c) => {
@@ -695,12 +1217,13 @@ api.get('/gateway-token', async (c) => {
     return c.json({ error: 'Not authenticated' }, 401);
   }
 
-  if (!c.env.MOLTBOT_GATEWAY_TOKEN) {
+  const masterToken = getGatewayMasterToken(c.env);
+  if (!masterToken) {
     return c.json({ error: 'Gateway token not configured' }, 500);
   }
 
   // Derive the per-user gateway token
-  const gatewayToken = await deriveUserGatewayToken(c.env.MOLTBOT_GATEWAY_TOKEN, user.id);
+  const gatewayToken = await deriveUserGatewayToken(masterToken, user.id);
 
   return c.json({
     token: gatewayToken,

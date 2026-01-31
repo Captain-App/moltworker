@@ -9,6 +9,23 @@
 
 set -e
 
+# ZOMBIE KILLER: Aggressively clean up any stale gateway processes
+# This prevents the "port 18789 already in use" crash loop
+echo "Checking for zombie processes..."
+
+# Kill any clawdbot processes (graceful then force)
+pkill -f "clawdbot gateway" 2>/dev/null || true
+pkill -9 -f "clawdbot" 2>/dev/null || true
+
+# Kill anything on port 18789
+fuser -k 18789/tcp 2>/dev/null || true
+
+# Clear all lock files
+rm -f /tmp/clawdbot*.lock /root/.clawdbot/*.lock /tmp/clawdbot-gateway.lock 2>/dev/null || true
+
+# Wait for cleanup
+sleep 2
+
 # Check if clawdbot gateway is already running - bail early if so
 # Note: CLI is still named "clawdbot" until upstream renames it
 if pgrep -f "clawdbot gateway" > /dev/null 2>&1; then
@@ -21,10 +38,36 @@ CONFIG_DIR="/root/.clawdbot"
 CONFIG_FILE="$CONFIG_DIR/clawdbot.json"
 TEMPLATE_DIR="/root/.clawdbot-templates"
 TEMPLATE_FILE="$TEMPLATE_DIR/moltbot.json.template"
-BACKUP_DIR="/data/moltbot"
+# Base R2 mount path - user data is in subdirectories
+R2_MOUNT="/data/openclaw"
+
+# Determine user-specific backup directory
+if [ -n "$OPENCLAW_USER_ID" ]; then
+    BACKUP_DIR="$R2_MOUNT/users/$OPENCLAW_USER_ID"
+    echo "User ID: $OPENCLAW_USER_ID"
+else
+    # Fallback for legacy single-user mode
+    BACKUP_DIR="$R2_MOUNT"
+fi
 
 echo "Config directory: $CONFIG_DIR"
 echo "Backup directory: $BACKUP_DIR"
+
+# Wait for R2 mount to be available (async mount can take a few seconds)
+echo "Waiting for R2 mount..."
+R2_WAIT=0
+while [ ! -d "$R2_MOUNT" ] && [ $R2_WAIT -lt 30 ]; do
+    sleep 1
+    R2_WAIT=$((R2_WAIT + 1))
+    echo "Waiting for R2... ($R2_WAIT/30)"
+done
+
+if [ -d "$R2_MOUNT" ]; then
+    echo "R2 mounted at $R2_MOUNT"
+    ls -la "$R2_MOUNT" | head -5
+else
+    echo "R2 mount not available after 30s, continuing without backup restore"
+fi
 
 # Create config directory
 mkdir -p "$CONFIG_DIR"
@@ -36,34 +79,74 @@ mkdir -p "$CONFIG_DIR"
 # The BACKUP_DIR may exist but be empty if R2 was just mounted
 # Note: backup structure is $BACKUP_DIR/clawdbot/ and $BACKUP_DIR/skills/
 
+# Helper function to parse ISO timestamp to epoch seconds (POSIX-compatible)
+# Handles formats: "syncId|2024-01-15T10:30:00Z" or "2024-01-15T10:30:00+00:00"
+parse_timestamp_to_epoch() {
+    local input="$1"
+
+    # If input contains |, extract the timestamp part (new format: syncId|timestamp)
+    if echo "$input" | grep -q '|'; then
+        input=$(echo "$input" | cut -d'|' -f2)
+    fi
+
+    # Try GNU date first (Linux)
+    local epoch=$(date -d "$input" +%s 2>/dev/null)
+    if [ -n "$epoch" ] && [ "$epoch" != "0" ]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Try BSD date (macOS) - requires different format
+    # Convert ISO format to BSD-compatible format
+    local bsd_date=$(echo "$input" | sed 's/T/ /; s/\+00:00//; s/Z//')
+    epoch=$(date -j -f "%Y-%m-%d %H:%M:%S" "$bsd_date" +%s 2>/dev/null)
+    if [ -n "$epoch" ] && [ "$epoch" != "0" ]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Fallback: extract just the date part and use simple comparison
+    # Extract YYYYMMDDHHMMSS for numeric comparison
+    local simple=$(echo "$input" | sed 's/[^0-9]//g' | cut -c1-14)
+    if [ -n "$simple" ]; then
+        echo "$simple"
+        return 0
+    fi
+
+    echo "0"
+    return 1
+}
+
 # Helper function to check if R2 backup is newer than local
 should_restore_from_r2() {
     local R2_SYNC_FILE="$BACKUP_DIR/.last-sync"
     local LOCAL_SYNC_FILE="$CONFIG_DIR/.last-sync"
-    
+
     # If no R2 sync timestamp, don't restore
     if [ ! -f "$R2_SYNC_FILE" ]; then
         echo "No R2 sync timestamp found, skipping restore"
         return 1
     fi
-    
+
     # If no local sync timestamp, restore from R2
     if [ ! -f "$LOCAL_SYNC_FILE" ]; then
         echo "No local sync timestamp, will restore from R2"
         return 0
     fi
-    
-    # Compare timestamps
+
+    # Read timestamps
     R2_TIME=$(cat "$R2_SYNC_FILE" 2>/dev/null)
     LOCAL_TIME=$(cat "$LOCAL_SYNC_FILE" 2>/dev/null)
-    
+
     echo "R2 last sync: $R2_TIME"
     echo "Local last sync: $LOCAL_TIME"
-    
-    # Convert to epoch seconds for comparison
-    R2_EPOCH=$(date -d "$R2_TIME" +%s 2>/dev/null || echo "0")
-    LOCAL_EPOCH=$(date -d "$LOCAL_TIME" +%s 2>/dev/null || echo "0")
-    
+
+    # Convert to epoch seconds for comparison using portable function
+    R2_EPOCH=$(parse_timestamp_to_epoch "$R2_TIME")
+    LOCAL_EPOCH=$(parse_timestamp_to_epoch "$LOCAL_TIME")
+
+    echo "R2 epoch: $R2_EPOCH, Local epoch: $LOCAL_EPOCH"
+
     if [ "$R2_EPOCH" -gt "$LOCAL_EPOCH" ]; then
         echo "R2 backup is newer, will restore"
         return 0
@@ -196,7 +279,17 @@ config.gateway.controlUi.allowInsecureAuth = true;
 // Telegram configuration
 if (process.env.TELEGRAM_BOT_TOKEN) {
     config.channels.telegram = config.channels.telegram || {};
-    config.channels.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
+    // Extract token from potentially malformed input (e.g., "description: 123:ABC..." -> "123:ABC...")
+    // Telegram tokens are always in format: number:alphanumeric
+    let telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+    const tokenMatch = telegramToken.match(/(\d+:[A-Za-z0-9_-]+)/);
+    if (tokenMatch) {
+        telegramToken = tokenMatch[1];
+        if (telegramToken !== process.env.TELEGRAM_BOT_TOKEN) {
+            console.log('Extracted Telegram token from malformed input');
+        }
+    }
+    config.channels.telegram.botToken = telegramToken;
     config.channels.telegram.enabled = true;
 }
 

@@ -18,7 +18,7 @@
  *
  * Optional secrets:
  * - SUPABASE_URL: Supabase project URL (for issuer validation)
- * - MOLTBOT_GATEWAY_TOKEN: Token to protect gateway access
+ * - MOLTBOT_GATEWAY_MASTER_TOKEN: Token to protect gateway access
  * - TELEGRAM_BOT_TOKEN: Telegram bot token
  * - DISCORD_BOT_TOKEN: Discord bot token
  * - SLACK_BOT_TOKEN + SLACK_APP_TOKEN: Slack tokens
@@ -28,9 +28,24 @@ import { Hono } from 'hono';
 import { getSandbox, Sandbox, type SandboxOptions } from '@cloudflare/sandbox';
 
 import type { AppEnv, MoltbotEnv, AuthenticatedUser } from './types';
-import { MOLTBOT_PORT } from './config';
+import { MOLTBOT_PORT, HEALTH_CHECK_CONFIG } from './config';
 import { createSupabaseAuthMiddleware } from '../platform/auth';
-import { ensureMoltbotGateway, findExistingMoltbotProcess, syncToR2, deriveUserGatewayToken } from './gateway';
+import {
+  ensureMoltbotGateway,
+  findExistingMoltbotProcess,
+  syncToR2,
+  deriveUserGatewayToken,
+  getGatewayMasterToken,
+  checkHealth,
+  shouldRestart,
+  recordRestart,
+} from './gateway';
+import {
+  createIssue,
+  logSyncEvent,
+  logHealthEvent,
+  logRestartEvent,
+} from './monitoring';
 import { publicRoutes, api, adminUi, debug, cdp } from './routes';
 import loadingPageHtml from './assets/loading.html';
 import configErrorHtml from './assets/config-error.html';
@@ -59,8 +74,8 @@ export { Sandbox };
 function validateRequiredEnv(env: MoltbotEnv): string[] {
   const missing: string[] = [];
 
-  if (!env.MOLTBOT_GATEWAY_TOKEN) {
-    missing.push('MOLTBOT_GATEWAY_TOKEN');
+  if (!getGatewayMasterToken(env)) {
+    missing.push('MOLTBOT_GATEWAY_MASTER_TOKEN (or legacy MOLTBOT_GATEWAY_TOKEN)');
   }
 
   // Require Supabase JWT secret for authentication
@@ -235,23 +250,23 @@ app.route('/', publicRoutes);
 app.get('/debug-bypass', async (c) => {
   console.log('[DEBUG-BYPASS] Hit debug-bypass endpoint');
   const secret = c.req.header('X-Debug-Secret');
-  const expectedSecret = c.env.MOLTBOT_GATEWAY_TOKEN;
-  
+  const expectedSecret = getGatewayMasterToken(c.env);
+
   console.log('[DEBUG-BYPASS] Secret provided:', !!secret);
   console.log('[DEBUG-BYPASS] Expected secret exists:', !!expectedSecret);
-  
+
   if (!secret || secret !== expectedSecret) {
     console.log('[DEBUG-BYPASS] Unauthorized - secret mismatch');
     return c.json({ error: 'Unauthorized', hasSecret: !!secret, hasExpected: !!expectedSecret }, 401);
   }
-  
+
   const sandbox = c.get('sandbox');
-  
+
   try {
     // Check gateway status
     const processes = await sandbox.listProcesses();
     const gatewayProcess = processes.find(p => p.command.includes('start-moltbot'));
-    
+
     return c.json({
       gateway: {
         running: !!gatewayProcess,
@@ -262,7 +277,7 @@ app.get('/debug-bypass', async (c) => {
       env: {
         hasAnthropicKey: !!c.env.ANTHROPIC_API_KEY,
         hasOpenAIKey: !!c.env.OPENAI_API_KEY,
-        hasGatewayToken: !!c.env.MOLTBOT_GATEWAY_TOKEN,
+        hasGatewayToken: !!getGatewayMasterToken(c.env),
         devMode: c.env.DEV_MODE,
       },
       timestamp: new Date().toISOString(),
@@ -322,10 +337,22 @@ app.use('*', async (c, next) => {
   const url = new URL(c.req.url);
   const publicPaths = ['/login', '/logout', '/auth/callback'];
   const isPublicPath = publicPaths.includes(url.pathname) ||
-                       url.pathname.startsWith('/_admin/assets/');
+                       url.pathname.startsWith('/_admin/assets/') ||
+                       url.pathname.startsWith('/debug/admin/') ||
+                       url.pathname.startsWith('/api/super/'); // TEMP: super admin debug endpoints
   console.log(`[AUTH] Path: ${url.pathname}, isPublic: ${isPublicPath}`);
   if (isPublicPath) {
     return next();
+  }
+
+  // Skip auth for admin API routes when X-Admin-Secret header is valid
+  if (url.pathname.startsWith('/api/admin/')) {
+    const adminSecret = c.req.header('X-Admin-Secret');
+    const expectedSecret = getGatewayMasterToken(c.env);
+    if (adminSecret && adminSecret === expectedSecret) {
+      console.log(`[AUTH] Admin secret auth for ${url.pathname}`);
+      return next();
+    }
   }
 
   // Determine response type based on Accept header
@@ -476,11 +503,12 @@ app.all('*', async (c) => {
     // Use per-user derived token if user is authenticated
     let wsUrl = new URL(request.url);
     let gatewayToken: string | undefined;
-    if (user && c.env.MOLTBOT_GATEWAY_TOKEN) {
-      gatewayToken = await deriveUserGatewayToken(c.env.MOLTBOT_GATEWAY_TOKEN, user.id);
+    const masterToken = getGatewayMasterToken(c.env);
+    if (user && masterToken) {
+      gatewayToken = await deriveUserGatewayToken(masterToken, user.id);
       console.log(`[WS] Using per-user derived token for user ${user.id.slice(0, 8)}...`);
     } else {
-      gatewayToken = c.env.MOLTBOT_GATEWAY_TOKEN;
+      gatewayToken = masterToken;
     }
 
     // Add token to URL and as header (container might not see URL params)
@@ -647,8 +675,9 @@ app.all('*', async (c) => {
 
     // Derive the gateway token for this user
     let gatewayToken = '';
-    if (c.env.MOLTBOT_GATEWAY_TOKEN) {
-      gatewayToken = await deriveUserGatewayToken(c.env.MOLTBOT_GATEWAY_TOKEN, user.id);
+    const masterToken = getGatewayMasterToken(c.env);
+    if (masterToken) {
+      gatewayToken = await deriveUserGatewayToken(masterToken, user.id);
     }
 
     const injectedScript = `
@@ -767,14 +796,14 @@ if ('${gatewayToken}') {
 
 /**
  * Scheduled handler for cron triggers.
- * Syncs all user containers to R2 for persistence.
+ * Runs health checks and syncs all user containers to R2.
  */
 async function scheduled(
   _event: ScheduledEvent,
   env: MoltbotEnv,
   _ctx: ExecutionContext
 ): Promise<void> {
-  console.log('[cron] Starting backup sync for all users...');
+  console.log('[cron] Starting health checks and backup sync...');
 
   // List all users from R2 bucket
   const userIds = new Set<string>();
@@ -788,16 +817,22 @@ async function scheduled(
     }
   } catch (err) {
     console.error('[cron] Failed to list users from R2:', err);
-    return;
   }
 
-  console.log(`[cron] Found ${userIds.size} users to sync`);
+  console.log(`[cron] Found ${userIds.size} users to check`);
 
   const options = buildSandboxOptions(env);
-  let successCount = 0;
-  let failCount = 0;
 
-  // Sync each user's sandbox
+  // Stats
+  let healthyCount = 0;
+  let unhealthyCount = 0;
+  let restartCount = 0;
+  let syncSuccessCount = 0;
+  let syncFailCount = 0;
+  let skippedCount = 0;
+  const issues: Array<{ userId: string; type: string; error: string }> = [];
+
+  // Process each user's sandbox
   for (const userId of userIds) {
     const sandboxName = `openclaw-${userId}`;
     const r2Prefix = `users/${userId}`;
@@ -809,25 +844,136 @@ async function scheduled(
       const processes = await sandbox.listProcesses();
       if (processes.length === 0) {
         console.log(`[cron] Skipping ${sandboxName} - no active processes`);
+        skippedCount++;
         continue;
       }
 
-      const result = await syncToR2(sandbox, env, { r2Prefix });
+      // Run health check
+      const healthResult = await checkHealth(sandbox, userId, HEALTH_CHECK_CONFIG);
 
-      if (result.success) {
-        console.log(`[cron] Synced ${sandboxName} at ${result.lastSync}`);
-        successCount++;
+      // Log health event
+      logHealthEvent(userId, healthResult.healthy, {
+        consecutiveFailures: healthResult.consecutiveFailures,
+        processRunning: healthResult.checks.processRunning,
+        portReachable: healthResult.checks.portReachable,
+        uptimeSeconds: healthResult.uptimeSeconds,
+      });
+
+      if (healthResult.healthy) {
+        healthyCount++;
+        console.log(`[cron] Health OK: ${sandboxName} (uptime: ${healthResult.uptimeSeconds}s)`);
       } else {
-        console.error(`[cron] Failed to sync ${sandboxName}:`, result.error);
-        failCount++;
+        unhealthyCount++;
+        console.warn(`[cron] Health FAIL: ${sandboxName} - failures: ${healthResult.consecutiveFailures}, checks: ${JSON.stringify(healthResult.checks)}`);
+
+        // Check if we should auto-restart
+        if (shouldRestart(userId, HEALTH_CHECK_CONFIG)) {
+          console.log(`[cron] Auto-restarting ${sandboxName} after ${healthResult.consecutiveFailures} consecutive failures`);
+          issues.push({ userId, type: 'auto_restart', error: `${healthResult.consecutiveFailures} consecutive health check failures` });
+
+          // Record issue to D1
+          if (env.PLATFORM_DB) {
+            await createIssue(env.PLATFORM_DB, {
+              type: 'health_failure',
+              severity: 'high',
+              userId,
+              message: `Auto-restart triggered after ${healthResult.consecutiveFailures} consecutive health check failures`,
+              details: {
+                checks: healthResult.checks,
+                uptimeSeconds: healthResult.uptimeSeconds,
+              },
+            });
+          }
+
+          try {
+            // Kill all processes
+            for (const proc of processes) {
+              try { await proc.kill(); } catch { /* ignore */ }
+            }
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Clear locks
+            try {
+              await sandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null');
+            } catch { /* ignore */ }
+
+            // Start fresh gateway (don't await - let it run async)
+            ensureMoltbotGateway(sandbox, env, userId).catch((err) => {
+              console.error(`[cron] Auto-restart failed for ${sandboxName}:`, err);
+            });
+
+            recordRestart(userId);
+            restartCount++;
+            logRestartEvent(userId, true, 'auto_health_failure', { previousFailures: healthResult.consecutiveFailures });
+            console.log(`[cron] Auto-restart initiated for ${sandboxName}`);
+          } catch (restartErr) {
+            console.error(`[cron] Failed to restart ${sandboxName}:`, restartErr);
+            issues.push({ userId, type: 'restart_failed', error: restartErr instanceof Error ? restartErr.message : 'Unknown error' });
+            logRestartEvent(userId, false, 'auto_health_failure', { previousFailures: healthResult.consecutiveFailures });
+
+            // Record restart failure to D1
+            if (env.PLATFORM_DB) {
+              await createIssue(env.PLATFORM_DB, {
+                type: 'restart',
+                severity: 'critical',
+                userId,
+                message: `Auto-restart failed: ${restartErr instanceof Error ? restartErr.message : 'Unknown error'}`,
+                details: { previousFailures: healthResult.consecutiveFailures },
+              });
+            }
+          }
+        }
       }
+
+      // Run sync (only if sandbox is active and healthy or just restarted)
+      const syncResult = await syncToR2(sandbox, env, { r2Prefix });
+
+      // Log sync event
+      logSyncEvent(userId, syncResult.success, syncResult.durationMs || 0, {
+        fileCount: syncResult.fileCount,
+        error: syncResult.error,
+        syncId: syncResult.syncId,
+      });
+
+      if (syncResult.success) {
+        console.log(`[cron] Synced ${sandboxName}: ${syncResult.fileCount} files in ${syncResult.durationMs}ms`);
+        syncSuccessCount++;
+      } else {
+        console.error(`[cron] Sync failed for ${sandboxName}: ${syncResult.error}`);
+        issues.push({ userId, type: 'sync_failed', error: syncResult.error || 'Unknown error' });
+        syncFailCount++;
+
+        // Record sync failure to D1 (only if consecutive failures)
+        // We don't want to spam issues for every single sync failure
+        const recentSyncFailures = issues.filter(i => i.userId === userId && i.type === 'sync_failed').length;
+        if (recentSyncFailures >= 3 && env.PLATFORM_DB) {
+          await createIssue(env.PLATFORM_DB, {
+            type: 'sync_failure',
+            severity: 'medium',
+            userId,
+            message: `Sync failed: ${syncResult.error}`,
+            details: {
+              rsyncExitCode: syncResult.rsyncExitCode,
+              syncId: syncResult.syncId,
+              details: syncResult.details,
+            },
+          });
+        }
+      }
+
     } catch (err) {
-      console.error(`[cron] Error syncing ${sandboxName}:`, err);
-      failCount++;
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[cron] Error processing ${sandboxName}:`, err);
+      issues.push({ userId, type: 'cron_error', error: errorMsg });
     }
   }
 
-  console.log(`[cron] Backup complete: ${successCount} succeeded, ${failCount} failed`);
+  // Log summary
+  console.log(`[cron] Complete - Health: ${healthyCount} healthy, ${unhealthyCount} unhealthy, ${restartCount} restarted`);
+  console.log(`[cron] Complete - Sync: ${syncSuccessCount} succeeded, ${syncFailCount} failed, ${skippedCount} skipped`);
+  if (issues.length > 0) {
+    console.error(`[cron] Issues:`, JSON.stringify(issues.slice(0, 10)));
+  }
 }
 
 export default {
