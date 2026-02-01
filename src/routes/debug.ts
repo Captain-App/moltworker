@@ -235,6 +235,60 @@ debug.get('/admin/users', async (c) => {
   }
 });
 
+// GET /debug/admin/users/search - Search users by email (from auth.users)
+debug.get('/admin/users/search', async (c) => {
+  const adminSecret = c.req.header('X-Admin-Secret');
+  const expectedSecret = getGatewayMasterToken(c.env);
+  
+  if (!adminSecret || adminSecret !== expectedSecret) {
+    return c.json({ error: 'Admin access required' }, 403);
+  }
+
+  const email = c.req.query('email');
+  if (!email) {
+    return c.json({ error: 'Missing ?email= query parameter' }, 400);
+  }
+
+  try {
+    const supabaseUrl = c.env.SUPABASE_URL || 'https://kjbcjkihxskuwwfdqklt.supabase.co';
+    const serviceRoleKey = c.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    if (!serviceRoleKey) {
+      return c.json({ error: 'SUPABASE_SERVICE_ROLE_KEY not configured' }, 500);
+    }
+
+    // Query auth.users via admin API (supports email search)
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users?page=1&per_page=50`, {
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+      },
+    });
+
+    if (!response.ok) {
+      return c.json({ error: 'Failed to fetch users', status: response.status }, 500);
+    }
+
+    const data = await response.json() as { users: Array<{ id: string; email: string; created_at: string; user_metadata?: { full_name?: string } }> };
+    
+    // Filter by email (case-insensitive partial match)
+    const searchTerm = email.toLowerCase();
+    const matches = data.users.filter(u => 
+      u.email?.toLowerCase().includes(searchTerm)
+    ).map(u => ({
+      id: u.id,
+      email: u.email,
+      fullName: u.user_metadata?.full_name || null,
+      createdAt: u.created_at,
+    }));
+
+    return c.json({ query: email, matches, count: matches.length });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
 // POST /debug/admin/users/:userId/impersonate - Get a JWT for the user to call gateway API
 debug.post('/admin/users/:userId/impersonate', async (c) => {
   const userId = c.req.param('userId');
