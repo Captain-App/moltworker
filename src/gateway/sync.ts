@@ -37,6 +37,13 @@ const recentSyncResults: Map<string, SyncResult[]> = new Map();
 const MAX_RECENT_RESULTS = 10;
 
 /**
+ * In-memory lock to prevent concurrent syncs for the same user.
+ * Key is r2Prefix, value is timestamp when sync started.
+ */
+const syncLocks: Map<string, number> = new Map();
+const SYNC_LOCK_TIMEOUT_MS = 60_000; // 60 seconds max sync duration
+
+/**
  * Get recent sync results for a user (for debugging)
  */
 export function getRecentSyncResults(r2Prefix?: string): SyncResult[] {
@@ -105,7 +112,45 @@ export async function syncToR2(
 ): Promise<SyncResult> {
   const startTime = Date.now();
   const syncId = generateSyncId();
+  const lockKey = options.r2Prefix || 'default';
 
+  // Check if another sync is already in progress for this user
+  const existingLock = syncLocks.get(lockKey);
+  if (existingLock) {
+    const lockAge = Date.now() - existingLock;
+    if (lockAge < SYNC_LOCK_TIMEOUT_MS) {
+      const result: SyncResult = {
+        success: false,
+        error: 'Sync already in progress',
+        details: `Another sync started ${Math.round(lockAge / 1000)}s ago. Skipping to prevent race condition.`,
+        syncId,
+        durationMs: Date.now() - startTime,
+      };
+      storeSyncResult(options.r2Prefix, result);
+      return result;
+    }
+    // Lock is stale, clear it
+    syncLocks.delete(lockKey);
+  }
+
+  // Acquire lock
+  syncLocks.set(lockKey, Date.now());
+
+  try {
+    return await doSyncToR2(sandbox, env, options, syncId, startTime);
+  } finally {
+    // Release lock
+    syncLocks.delete(lockKey);
+  }
+}
+
+async function doSyncToR2(
+  sandbox: Sandbox,
+  env: MoltbotEnv,
+  options: SyncOptions,
+  syncId: string,
+  startTime: number
+): Promise<SyncResult> {
   // Check if R2 is configured
   if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.CF_ACCOUNT_ID) {
     const result: SyncResult = { success: false, error: 'R2 storage is not configured', syncId };
@@ -132,16 +177,22 @@ export async function syncToR2(
     ? getR2MountPathForUser(options.r2Prefix)
     : R2_MOUNT_PATH;
 
-  // Sanity check: verify source has critical files before syncing
+  // Sanity check: verify source has valid config before syncing
+  // This prevents overwriting good R2 backups with empty/corrupted data
   try {
-    const checkProc = await sandbox.startProcess('test -f /root/.clawdbot/clawdbot.json && echo "ok"');
+    // Check file exists and has valid JSON with required fields
+    const checkProc = await sandbox.startProcess(
+      'test -f /root/.clawdbot/clawdbot.json && ' +
+      'node -e "const c=JSON.parse(require(\'fs\').readFileSync(\'/root/.clawdbot/clawdbot.json\')); ' +
+      'if(!c.agents && !c.channels && !c.gateway) throw new Error(\'Empty config\'); console.log(\'ok\')"'
+    );
     await waitForProcess(checkProc, 5000);
     const checkLogs = await checkProc.getLogs();
     if (!checkLogs.stdout?.includes('ok')) {
       const result: SyncResult = {
         success: false,
-        error: 'Sync aborted: source missing clawdbot.json',
-        details: 'The local config directory is missing critical files. This could indicate corruption or an incomplete setup.',
+        error: 'Sync aborted: config appears empty or invalid',
+        details: `Local clawdbot.json exists but lacks required fields. stderr: ${checkLogs.stderr?.slice(0, 200)}`,
         syncId,
         durationMs: Date.now() - startTime,
       };
@@ -151,7 +202,7 @@ export async function syncToR2(
   } catch (err) {
     const result: SyncResult = {
       success: false,
-      error: 'Failed to verify source files',
+      error: 'Failed to verify source config',
       details: err instanceof Error ? err.message : 'Unknown error',
       syncId,
       durationMs: Date.now() - startTime,
@@ -193,11 +244,12 @@ export async function syncToR2(
     // Non-critical, continue with sync
   }
 
-  // Run rsync to backup config to R2
+  // Run rsync to backup config and workspace to R2
   // Note: Use --no-times because s3fs doesn't support setting timestamps
   // Use && between commands to ensure they run sequentially and we can check overall success
+  // Backup both /root/.clawdbot/ (config) and /root/clawd/ (workspace including scripts, skills, etc.)
   const timestamp = new Date().toISOString();
-  const syncCmd = `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${mountPath}/clawdbot/ && rsync -r --no-times --delete /root/clawd/skills/ ${mountPath}/skills/ 2>/dev/null; rsync_exit=$?; echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync; exit $rsync_exit`;
+  const syncCmd = `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${mountPath}/clawdbot/ && rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/clawd/ ${mountPath}/workspace/ 2>/dev/null; rsync_exit=$?; echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync; exit $rsync_exit`;
 
   try {
     const proc = await sandbox.startProcess(syncCmd);
@@ -269,10 +321,13 @@ export async function syncToR2(
     return result;
 
   } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+    const errorStack = err instanceof Error ? err.stack : undefined;
+    console.error(`[sync] Sync failed for ${options.r2Prefix || 'default'}: ${errorMsg}`, errorStack);
     const result: SyncResult = {
       success: false,
-      error: 'Sync error',
-      details: err instanceof Error ? err.message : 'Unknown error',
+      error: `Sync error: ${errorMsg}`,
+      details: errorStack || errorMsg,
       syncId,
       durationMs: Date.now() - startTime,
     };
