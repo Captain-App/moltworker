@@ -41,6 +41,8 @@ import {
   shouldRestart,
   recordRestart,
   createDailyBackup,
+  getSandboxForUser,
+  getInstanceTypeName,
 } from './gateway';
 import {
   createIssue,
@@ -163,9 +165,17 @@ app.use('*', async (c, next) => {
   }
 
   const options = buildSandboxOptions(c.env);
-  // Initially use default sandbox; will be updated for authenticated users
   const sandboxName = getSandboxNameForRequest(c);
-  const sandbox = getSandbox(c.env.Sandbox, sandboxName, options);
+  const user = c.get('user');
+  
+  // Use tiered sandbox based on user ID, or fallback to default
+  const sandboxBinding = user ? getSandboxForUser(c.env, user.id) : c.env.Sandbox;
+  const sandbox = getSandbox(sandboxBinding, sandboxName, options);
+  
+  if (user) {
+    console.log(`[SANDBOX] User ${user.id} using ${getInstanceTypeName(user.id)} tier`);
+  }
+  
   c.set('sandbox', sandbox);
   await next();
 });

@@ -529,9 +529,9 @@ async function withWake(env: any, userId: string, operation: () => Promise<Respo
     const bootPromise = ensureMoltbotGateway(sandbox, env, userId).catch(() => {});
     env.executionCtx?.waitUntil?.(bootPromise);
     
-    // Wait for it to be ready (extended timeout for cold starts)
-    const maxWaitMs = 120000;
-    const pollIntervalMs = 2000;
+    // Wait for it to be ready
+    const maxWaitMs = 30000;
+    const pollIntervalMs = 1000;
     const startTime = Date.now();
     
     while (Date.now() - startTime < maxWaitMs) {
@@ -607,135 +607,73 @@ adminRouter.post('/users/:id/exec', requireSuperAuth, async (c) => {
 // Phase 1: Native File Operations
 // =============================================================================
 
-// GET /api/super/users/:id/files/:path{.+} - Read file with R2 fallback and retry
+// GET /api/super/users/:id/files/:path{.+} - Read file using native SDK
 adminRouter.get('/users/:id/files/:path{.+}', requireSuperAuth, async (c) => {
   const userId = c.req.param('id');
   const path = c.req.param('path') || '';
-  const source = c.req.query('source') || 'auto'; // 'r2', 'container', or 'auto'
   
   if (!path) {
     return c.json({ error: 'File path is required' }, 400);
   }
 
-  // Helper: Read from R2
-  async function readFromR2(): Promise<{success: boolean; data?: any; error?: string}> {
+  return await withWake(c.env, userId, async () => {
+    const sandbox = await getUserSandbox(c.env, userId, true);
+    
     try {
-      const r2Path = `users/${userId}/${path}`;
-      const obj = await c.env.MOLTBOT_BUCKET.get(r2Path);
-      if (!obj) return { success: false, error: 'not_found' };
+      // Use native readFile SDK method
+      const result = await sandbox.readFile(path);
       
-      const content = await obj.text();
-      return {
-        success: true,
-        data: {
+      if (!result.success) {
+        return c.json({
           userId,
           path,
-          content,
-          size: content.length,
-          timestamp: obj.uploaded?.toISOString() || new Date().toISOString(),
-          source: 'r2',
-        }
-      };
-    } catch (e) {
-      return { success: false, error: String(e) };
-    }
-  }
+          error: 'Failed to read file',
+          exitCode: result.exitCode,
+        }, 500);
+      }
 
-  // Helper: Read from container with retry
-  async function readFromContainer(retries = 3): Promise<{success: boolean; data?: any; error?: string}> {
-    let lastError: Error | null = null;
-    
-    for (let attempt = 0; attempt < retries; attempt++) {
-      if (attempt > 0) {
-        const delay = Math.min(1000 * Math.pow(2, attempt), 8000); // Exponential backoff
-        console.log(`[FILE-READ] Retry ${attempt + 1}/${retries} for ${userId}:${path} after ${delay}ms`);
-        await new Promise(r => setTimeout(r, delay));
+      // For binary files or large files, return metadata only
+      if (result.isBinary || (result.size && result.size > 1024 * 1024)) {
+        return c.json({
+          userId,
+          path,
+          size: result.size,
+          encoding: result.encoding,
+          isBinary: result.isBinary,
+          mimeType: result.mimeType,
+          message: 'File is binary or large (>1MB). Use R2 for streaming.',
+        }, 200);
+      }
+
+      return c.json({
+        userId,
+        path,
+        content: result.content,
+        encoding: result.encoding,
+        size: result.size,
+        mimeType: result.mimeType,
+        timestamp: result.timestamp,
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      // Check if file doesn't exist
+      if (errorMessage.includes('not found') || errorMessage.includes('No such file')) {
+        return c.json({
+          userId,
+          path,
+          error: 'File not found',
+        }, 404);
       }
       
-      try {
-        return await withWake(c.env, userId, async () => {
-          const sandbox = await getUserSandbox(c.env, userId, true);
-          const result = await sandbox.readFile(path);
-          
-          if (!result.success) {
-            throw new Error(`readFile failed: ${result.exitCode}`);
-          }
-          
-          return {
-            success: true,
-            data: {
-              userId,
-              path,
-              content: result.content,
-              encoding: result.encoding,
-              size: result.size,
-              mimeType: result.mimeType,
-              timestamp: result.timestamp,
-              source: 'container',
-            }
-          };
-        });
-      } catch (err) {
-        lastError = err as Error;
-        const errorMsg = lastError.message.toLowerCase();
-        // Don't retry on "not found" errors
-        if (errorMsg.includes('not found') || errorMsg.includes('no such file')) {
-          break;
-        }
-      }
+      return c.json({
+        userId,
+        path,
+        error: errorMessage,
+      }, 500);
     }
-    
-    return { success: false, error: lastError?.message || 'Failed after retries' };
-  }
-
-  try {
-    // If explicitly requesting R2
-    if (source === 'r2') {
-      const r2Result = await readFromR2();
-      if (!r2Result.success) {
-        return c.json({ userId, path, error: 'File not found in R2' }, 404);
-      }
-      return c.json(r2Result.data);
-    }
-
-    // If explicitly requesting container only
-    if (source === 'container') {
-      const containerResult = await readFromContainer(3);
-      if (!containerResult.success) {
-        const statusCode = containerResult.error?.includes('not found') ? 404 : 500;
-        return c.json({ userId, path, error: containerResult.error }, statusCode);
-      }
-      return c.json(containerResult.data);
-    }
-
-    // AUTO mode: Try container first (with retry), fallback to R2
-    const containerResult = await readFromContainer(3);
-    if (containerResult.success) {
-      return c.json(containerResult.data);
-    }
-
-    // Container failed - try R2 as fallback
-    console.log(`[FILE-READ] Container read failed for ${userId}:${path}, trying R2 fallback...`);
-    const r2Result = await readFromR2();
-    
-    if (r2Result.success) {
-      return c.json({ ...r2Result.data, fallback: true });
-    }
-
-    // Both failed
-    const errorStatus = containerResult.error?.includes('not found') ? 404 : 500;
-    return c.json({ 
-      userId, 
-      path, 
-      error: 'File not found',
-      containerError: containerResult.error,
-      r2Error: r2Result.error,
-    }, errorStatus);
-
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return c.json({ userId, path, error: errorMessage }, 500);
-  }
+  });
 });
 
 // HEAD /api/super/users/:id/files/:path{.+}/exists - Check file exists and get metadata

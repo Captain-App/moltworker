@@ -14,3 +14,4 @@ export {
   getAllHealthStates,
 } from './health';
 export type { HealthCheckResult, HealthCheckConfig } from './health';
+export { getSandboxForUser, getInstanceTypeName, setUserTier, getAllTierAssignments } from './tiers';

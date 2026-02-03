@@ -5,6 +5,11 @@ import type { D1Database } from './monitoring';
  * Environment bindings for the Moltbot Worker
  */
 export interface MoltbotEnv {
+  // Per-tier sandbox bindings for different instance types
+  SandboxStandard1: DurableObjectNamespace<Sandbox>;
+  SandboxStandard2: DurableObjectNamespace<Sandbox>;
+  SandboxStandard3: DurableObjectNamespace<Sandbox>;
+  // Legacy fallback
   Sandbox: DurableObjectNamespace<Sandbox>;
   ASSETS: Fetcher; // Assets binding for admin UI static files
   MOLTBOT_BUCKET: R2Bucket; // R2 bucket for persistent storage
