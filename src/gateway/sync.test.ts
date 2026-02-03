@@ -41,7 +41,7 @@ describe('syncToR2', () => {
   });
 
   describe('sanity checks', () => {
-    it('returns error when source is missing clawdbot.json', async () => {
+    it('returns error when config appears empty or invalid', async () => {
       const { sandbox, startProcessMock } = createMockSandbox();
       startProcessMock
         .mockResolvedValueOnce(createMockProcess('s3fs on /data/moltbot type fuse.s3fs\n'))
@@ -51,10 +51,9 @@ describe('syncToR2', () => {
 
       const result = await syncToR2(sandbox, env);
 
-      // Error message still references clawdbot.json since that's the actual file name
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Sync aborted: source missing clawdbot.json');
-      expect(result.details).toContain('missing critical files');
+      expect(result.error).toBe('Sync aborted: config appears empty or invalid');
+      expect(result.details).toContain('Local clawdbot.json exists');
     });
   });
 

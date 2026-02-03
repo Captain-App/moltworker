@@ -56,9 +56,110 @@ function createMockKV() {
   };
 }
 
+// Create a minimal in-memory D1 mock for relay message storage
+function createMockD1() {
+  type Row = {
+    group_id: string;
+    bot_id: string;
+    bot_name: string;
+    message_id: number;
+    text: string;
+    timestamp: number;
+    reply_to_message_id?: number | null;
+    thread_id?: string | null;
+    media_url?: string | null;
+    media_type?: string | null;
+  };
+
+  const messages = new Map<string, Row>();
+
+  const db = {
+    prepare: vi.fn((query: string) => {
+      let bound: unknown[] = [];
+
+      const stmt = {
+        bind: (...values: unknown[]) => {
+          bound = values;
+          return stmt;
+        },
+        run: vi.fn(async () => {
+          if (query.includes('INSERT INTO relay_messages')) {
+            const [
+              groupId,
+              botId,
+              botName,
+              messageId,
+              text,
+              timestamp,
+              replyToMessageId,
+              threadId,
+              mediaUrl,
+              mediaType,
+            ] = bound as unknown as [
+              string,
+              string,
+              string,
+              number,
+              string,
+              number,
+              number | null,
+              string | null,
+              string | null,
+              string | null,
+            ];
+
+            const key = `${groupId}|${botId}|${messageId}`;
+            messages.set(key, {
+              group_id: groupId,
+              bot_id: botId,
+              bot_name: botName,
+              message_id: messageId,
+              text,
+              timestamp,
+              reply_to_message_id: replyToMessageId,
+              thread_id: threadId,
+              media_url: mediaUrl,
+              media_type: mediaType,
+            });
+          }
+          return { success: true, results: [], meta: { changes: 1 } };
+        }),
+        all: vi.fn(async () => {
+          if (query.includes('FROM relay_messages')) {
+            const groupId = bound[0] as string;
+            const since = bound[1] as number;
+            const includeSelf = !query.includes('bot_id != ?');
+            const excludeBotId = includeSelf ? undefined : (bound[2] as string);
+            const limit = includeSelf ? (bound[2] as number) : (bound[3] as number);
+
+            const results = Array.from(messages.values())
+              .filter(row => row.group_id === groupId)
+              .filter(row => row.timestamp > since)
+              .filter(row => (excludeBotId ? row.bot_id !== excludeBotId : true))
+              .sort((a, b) => a.timestamp - b.timestamp)
+              .slice(0, limit);
+
+            return { success: true, results, meta: {} };
+          }
+          return { success: true, results: [], meta: {} };
+        }),
+        first: vi.fn(async () => null),
+      };
+
+      return stmt;
+    }),
+    batch: vi.fn(async () => []),
+    exec: vi.fn(async () => ({ count: 0 })),
+    _messages: messages,
+  };
+
+  return db;
+}
+
 // Create test app with mock bindings
 function createTestApp() {
   const mockKV = createMockKV();
+  const mockDB = createMockD1();
 
   const app = new Hono<RelayAppEnv>();
 
@@ -66,6 +167,7 @@ function createTestApp() {
   app.use('*', async (c, next) => {
     (c.env as RelayAppEnv['Bindings']) = {
       RELAY: mockKV as unknown as KVNamespace,
+      PLATFORM_DB: mockDB as unknown as any,
       SUPABASE_JWT_SECRET: 'test-secret',
       SUPABASE_URL: 'https://test.supabase.co',
       ADMIN_USER_IDS: 'admin-user-id',
@@ -75,7 +177,7 @@ function createTestApp() {
 
   app.route('/relay', relayRoutes);
 
-  return { app, mockKV };
+  return { app, mockKV, mockDB };
 }
 
 // Mock JWT payload that satisfies the type requirements
@@ -173,7 +275,7 @@ describe('POST /relay/broadcast', () => {
   });
 
   it('broadcasts a message successfully', async () => {
-    const { app, mockKV } = createTestApp();
+    const { app, mockKV, mockDB } = createTestApp();
 
     // Set up mock JWT verification - cast to any to satisfy mock types
     vi.mocked(verifySupabaseJWT).mockResolvedValueOnce(mockJwtPayload('user-123') as any);
@@ -206,8 +308,9 @@ describe('POST /relay/broadcast', () => {
     const body = (await res.json()) as { ok: boolean };
     expect(body.ok).toBe(true);
 
-    // Verify message was stored
-    expect(mockKV.put).toHaveBeenCalled();
+    // Verify message was written to D1
+    expect(mockKV.get).toHaveBeenCalled();
+    expect(mockDB._messages.size).toBe(1);
   });
 
   it('returns 401 without authentication', async () => {
@@ -258,7 +361,7 @@ describe('GET /relay/poll', () => {
   });
 
   it('returns messages from other bots', async () => {
-    const { app, mockKV } = createTestApp();
+    const { app, mockKV, mockDB } = createTestApp();
 
     vi.mocked(verifySupabaseJWT).mockResolvedValueOnce(mockJwtPayload('user-123') as any);
 
@@ -272,33 +375,31 @@ describe('GET /relay/poll', () => {
     };
     mockKV._store.set('relay:membership:user-123:-100123', JSON.stringify(membership));
 
-    // Pre-populate messages
-    const msg1: RelayMessage = {
-      messageId: 1,
+    // Pre-populate messages in D1
+    mockDB._messages.set('-100123|other-bot-1|1', {
+      group_id: '-100123',
+      bot_id: 'other-bot-1',
+      bot_name: 'BotA',
+      message_id: 1,
       text: 'Hello from bot A',
-      botId: 'other-bot-1',
-      botName: 'BotA',
       timestamp: 1706000001,
-    };
-    const msg2: RelayMessage = {
-      messageId: 2,
+    });
+    mockDB._messages.set('-100123|other-bot-2|2', {
+      group_id: '-100123',
+      bot_id: 'other-bot-2',
+      bot_name: 'BotB',
+      message_id: 2,
       text: 'Hello from bot B',
-      botId: 'other-bot-2',
-      botName: 'BotB',
       timestamp: 1706000002,
-    };
-    // This message should be filtered out (same bot)
-    const ownMsg: RelayMessage = {
-      messageId: 3,
+    });
+    mockDB._messages.set('-100123|user-123|3', {
+      group_id: '-100123',
+      bot_id: 'user-123',
+      bot_name: 'my_bot',
+      message_id: 3,
       text: 'My own message',
-      botId: 'user-123',
-      botName: 'my_bot',
       timestamp: 1706000003,
-    };
-
-    mockKV._store.set('relay:msg:-100123:000001706000001:1', JSON.stringify(msg1));
-    mockKV._store.set('relay:msg:-100123:000001706000002:2', JSON.stringify(msg2));
-    mockKV._store.set('relay:msg:-100123:000001706000003:3', JSON.stringify(ownMsg));
+    });
 
     const res = await app.request('/relay/poll?groupId=-100123&since=0', {
       headers: { Authorization: 'Bearer valid-jwt' },
@@ -313,7 +414,7 @@ describe('GET /relay/poll', () => {
   });
 
   it('filters messages by since parameter', async () => {
-    const { app, mockKV } = createTestApp();
+    const { app, mockKV, mockDB } = createTestApp();
 
     vi.mocked(verifySupabaseJWT).mockResolvedValueOnce(mockJwtPayload('user-123') as any);
 
@@ -326,23 +427,22 @@ describe('GET /relay/poll', () => {
     };
     mockKV._store.set('relay:membership:user-123:-100123', JSON.stringify(membership));
 
-    const msg1: RelayMessage = {
-      messageId: 1,
+    mockDB._messages.set('-100123|other-bot|1', {
+      group_id: '-100123',
+      bot_id: 'other-bot',
+      bot_name: 'Bot',
+      message_id: 1,
       text: 'Old message',
-      botId: 'other-bot',
-      botName: 'Bot',
       timestamp: 1706000001,
-    };
-    const msg2: RelayMessage = {
-      messageId: 2,
+    });
+    mockDB._messages.set('-100123|other-bot|2', {
+      group_id: '-100123',
+      bot_id: 'other-bot',
+      bot_name: 'Bot',
+      message_id: 2,
       text: 'New message',
-      botId: 'other-bot',
-      botName: 'Bot',
       timestamp: 1706000010,
-    };
-
-    mockKV._store.set('relay:msg:-100123:000001706000001:1', JSON.stringify(msg1));
-    mockKV._store.set('relay:msg:-100123:000001706000010:2', JSON.stringify(msg2));
+    });
 
     // Poll with since=1706000001 should only return msg2
     const res = await app.request('/relay/poll?groupId=-100123&since=1706000001', {
