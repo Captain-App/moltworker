@@ -1381,4 +1381,83 @@ adminRouter.get('/cost/rates', requireSuperAuth, async (c) => {
   });
 });
 
+// POST /api/super/users/:id/message - Direct message to container (admin bypass)
+// Allows admin to impersonate any user and send messages directly to their container
+// This bypasses Telegram/Discord pairing requirements
+adminRouter.post('/users/:id/message', requireSuperAuth, async (c) => {
+  const userId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const { text, asUserId, sessionKey } = body;
+  
+  if (!text || typeof text !== 'string') {
+    return c.json({ error: 'Message text is required' }, 400);
+  }
+  
+  const impersonatedUserId = asUserId || 'admin';
+  const messageSessionKey = sessionKey || `admin-${Date.now()}`;
+  
+  return await withWake(c.env, userId, async () => {
+    const sandbox = await getUserSandbox(c.env, userId, true);
+    
+    try {
+      // Create a message payload that mimics normal channel delivery
+      const messagePayload = {
+        id: `admin-${Date.now()}`,
+        sessionKey: messageSessionKey,
+        text: text,
+        from: {
+          id: impersonatedUserId,
+          name: 'Admin',
+          isAdmin: true,
+        },
+        timestamp: new Date().toISOString(),
+        channel: 'admin-direct',
+      };
+      
+      // Write to container's message inbox
+      const inboxPath = `/tmp/admin-messages/${messageSessionKey}.json`;
+      const inboxDir = '/tmp/admin-messages';
+      
+      // Ensure directory exists
+      try {
+        await sandbox.mkdir(inboxDir, { recursive: true });
+      } catch {
+        // Directory may already exist
+      }
+      
+      // Write message to inbox
+      await sandbox.writeFile(inboxPath, JSON.stringify(messagePayload, null, 2));
+      
+      // Trigger the gateway to process the message
+      // This simulates what happens when a real message arrives
+      const triggerProc = await sandbox.startProcess(
+        `cd /root/clawd && echo '${JSON.stringify(messagePayload)}' | clawdbot message --stdin --session "${messageSessionKey}" --from "${impersonatedUserId}" 2>&1 || echo "Message queued for processing"`
+      );
+      
+      await new Promise(r => setTimeout(r, 500));
+      const logs = await triggerProc.getLogs();
+      
+      return c.json({
+        success: true,
+        userId,
+        impersonatedAs: impersonatedUserId,
+        sessionKey: messageSessionKey,
+        message: text,
+        gatewayResponse: logs.stdout || 'Message delivered to container',
+        timestamp: messagePayload.timestamp,
+        note: 'Admin direct message bypasses normal channel authentication'
+      });
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return c.json({
+        error: 'Failed to deliver admin message',
+        details: errorMessage,
+        userId,
+        impersonatedAs: impersonatedUserId,
+      }, 500);
+    }
+  });
+});
+
 export { adminRouter };
