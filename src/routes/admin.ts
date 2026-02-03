@@ -24,11 +24,16 @@ async function requireSuperAuth(c: any, next: () => Promise<void>) {
   await next();
 }
 
-// Helper: Get sandbox for a user
+// Helper: Get sandbox for a user with tiered routing support
 async function getUserSandbox(env: any, userId: string, keepAlive = false) {
   const { getSandbox } = await import('@cloudflare/sandbox');
+  const { getSandboxForUser } = await import('../gateway/tiers');
   const sandboxName = `openclaw-${userId}`;
-  return getSandbox(env.Sandbox, sandboxName, { 
+  
+  // Use tiered routing for migrated users, legacy for others
+  const sandboxBinding = getSandboxForUser(env, userId);
+  
+  return getSandbox(sandboxBinding, sandboxName, { 
     keepAlive,
     containerTimeouts: {
       instanceGetTimeoutMS: 30000,

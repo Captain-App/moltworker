@@ -69,8 +69,6 @@ function transformErrorMessage(message: string, host: string): string {
   return message;
 }
 
-export { Sandbox };
-
 /**
  * Validate required environment variables.
  * Returns an array of missing variable descriptions, or empty array if all are set.
@@ -168,12 +166,15 @@ app.use('*', async (c, next) => {
   const sandboxName = getSandboxNameForRequest(c);
   const user = c.get('user');
   
-  // Use tiered sandbox based on user ID, or fallback to default
+  // SAFETY: Use tiered routing only for migrated users when enabled
+  // All other users (including Jack until explicitly migrated) use legacy binding
   const sandboxBinding = user ? getSandboxForUser(c.env, user.id) : c.env.Sandbox;
   const sandbox = getSandbox(sandboxBinding, sandboxName, options);
   
   if (user) {
-    console.log(`[SANDBOX] User ${user.id} using ${getInstanceTypeName(user.id)} tier`);
+    const instanceType = getInstanceTypeName(user.id);
+    const isTiered = sandboxBinding !== c.env.Sandbox;
+    console.log(`[SANDBOX] User ${user.id} using ${instanceType}${isTiered ? ' (tiered)' : ' (legacy)'}`);
   }
   
   c.set('sandbox', sandbox);
@@ -1045,6 +1046,15 @@ async function scheduled(
     console.error(`[cron] Issues:`, JSON.stringify(issues.slice(0, 10)));
   }
 }
+
+// Export Durable Object classes for tiered instance types
+export { Sandbox } from '@cloudflare/sandbox';
+
+// Re-export Sandbox as tiered class names for binding compatibility
+// All tier classes use the same underlying implementation
+export class SandboxStandard1 extends Sandbox {}
+export class SandboxStandard2 extends Sandbox {}
+export class SandboxStandard3 extends Sandbox {}
 
 export default {
   fetch: app.fetch,

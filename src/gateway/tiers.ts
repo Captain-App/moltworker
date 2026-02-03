@@ -6,6 +6,11 @@
 import type { Sandbox } from '@cloudflare/sandbox';
 import type { MoltbotEnv } from '../types';
 
+// Feature flag - controlled via env.TIERED_ROUTING_ENABLED
+// When false (default), all users use legacy 'Sandbox' binding
+// When true, migrated users use tiered bindings based on USER_TIER_MAP
+const TIERED_ROUTING_ENABLED = false; // Will be overridden by env var
+
 /**
  * User ID to instance tier mapping
  * standard-1: 1 vCPU, 1 GiB RAM (~$3/mo) - default
@@ -22,17 +27,53 @@ const USER_TIER_MAP: Record<string, 1 | 2 | 3> = {
   // Default: all other users get standard-1
 };
 
+// Track which users have been migrated to tiered namespaces
+// Migration requires: R2 sync → stop old → start new → verify
+const MIGRATED_USERS = new Set<string>([
+  // Add user IDs here AFTER successful migration
+  // '32c7100e-c6ce-4cf8-8b64-edf4ac3b760b', // Jack - migrated
+  // '81bf6a68-28fe-48ef-b257-f9ad013e6298', // Josh - migrated
+]);
+
+/**
+ * Check if tiered routing is enabled (feature flag)
+ */
+function isTieredRoutingEnabled(env: MoltbotEnv): boolean {
+  // Check env var first, fallback to compile-time default
+  if (env.TIERED_ROUTING_ENABLED !== undefined) {
+    return env.TIERED_ROUTING_ENABLED === 'true' || env.TIERED_ROUTING_ENABLED === true;
+  }
+  return TIERED_ROUTING_ENABLED;
+}
+
 /**
  * Get the appropriate sandbox binding for a user based on their tier
+ * 
+ * SAFETY: Returns legacy 'Sandbox' binding for:
+ * - Non-migrated users (even if feature flag is on)
+ * - All users when feature flag is off
+ * - Any user where tiered binding is undefined
  */
 export function getSandboxForUser(env: MoltbotEnv, userId: string): MoltbotEnv['SandboxStandard1'] {
+  // Phase 2: Only use tiered routing if explicitly enabled AND user is migrated
+  const tieredEnabled = isTieredRoutingEnabled(env);
+  const isMigrated = MIGRATED_USERS.has(userId);
+  
+  if (!tieredEnabled || !isMigrated) {
+    // Use legacy binding for safety
+    return env.Sandbox;
+  }
+  
+  // User is migrated and tiered routing is enabled
   const tier = USER_TIER_MAP[userId] || 1;
+  
+  console.log(`[TIERS] Using tiered binding for ${userId}: standard-${tier}`);
   
   switch (tier) {
     case 3:
-      return env.SandboxStandard3 || env.Sandbox;
+      return env.SandboxStandard3 || env.SandboxStandard2 || env.SandboxStandard1 || env.Sandbox;
     case 2:
-      return env.SandboxStandard2 || env.Sandbox;
+      return env.SandboxStandard2 || env.SandboxStandard1 || env.Sandbox;
     case 1:
     default:
       return env.SandboxStandard1 || env.Sandbox;

@@ -28,6 +28,11 @@ export interface MoltbotEnv {
   DEV_MODE?: string; // Set to 'true' for local dev (skips auth + moltbot device pairing)
   DEBUG_ROUTES?: string; // Set to 'true' to enable /debug/* routes
   SANDBOX_SLEEP_AFTER?: string; // How long before sandbox sleeps: 'never' (default), or duration like '10m', '1h'
+  
+  // Tiered instance routing feature flag
+  // When 'true', migrated users use tiered SandboxStandard1/2/3 bindings
+  // When 'false' (default), all users use legacy 'Sandbox' binding
+  TIERED_ROUTING_ENABLED?: string | boolean;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_DM_POLICY?: string;
   DISCORD_BOT_TOKEN?: string;
