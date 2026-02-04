@@ -144,7 +144,7 @@ async function wakeContainer(
     try {
       const processes = await sandbox.listProcesses();
       const gatewayRunning = processes.some((p: any) => 
-        p.command?.includes('clawdbot gateway') && 
+        p.command?.includes('openclaw gateway') && 
         p.status === 'running'
       );
       
@@ -195,7 +195,7 @@ async function withWakeAndRetry(
       try {
         const processes = await sandbox.listProcesses();
         const gatewayRunning = processes.some((p: any) => 
-          p.command?.includes('clawdbot gateway') && 
+          p.command?.includes('openclaw gateway') && 
           p.status === 'running'
         );
         
@@ -212,7 +212,7 @@ async function withWakeAndRetry(
         } else {
           // Processes exist but no gateway - might be starting or stuck
           const hasStartingGateway = processes.some((p: any) => 
-            p.command?.includes('clawdbot gateway') && 
+            p.command?.includes('openclaw gateway') && 
             p.status === 'starting'
           );
           
@@ -842,7 +842,7 @@ adminImprovedRouter.get('/users/:id/health', requireSuperAuth, async (c) => {
       const gatewayStart = Date.now();
       const processes = await sandbox.listProcesses();
       const gatewayProcess = processes.find((p: any) => 
-        p.command?.includes('clawdbot gateway') && 
+        p.command?.includes('openclaw gateway') && 
         p.status === 'running'
       );
       checks.gateway = !!gatewayProcess;
@@ -890,7 +890,7 @@ adminImprovedRouter.get('/users/:id/health', requireSuperAuth, async (c) => {
     // Check has config
     try {
       const configStart = Date.now();
-      const configProc = await sandbox.startProcess('test -f /root/.clawdbot/clawdbot.json && echo "exists"');
+      const configProc = await sandbox.startProcess('test -f /root/.openclaw/openclaw.json && echo "exists"');
       await configProc.waitForExit(2000);
       const logs = await configProc.getLogs();
       results.hasConfig = logs.stdout?.includes('exists') ?? false;

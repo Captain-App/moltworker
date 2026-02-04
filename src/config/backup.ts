@@ -60,16 +60,16 @@ export function isBackupFeatureEnabled(
  */
 export const CRITICAL_PATHS = [
   // Credentials (HIGHEST priority)
-  '/root/.clawdbot/credentials/**/*.json',
-  '/root/.clawdbot/clawdbot.json',
-  '/root/.clawdbot/.registered',
-  
+  '/root/.openclaw/credentials/**/*.json',
+  '/root/.openclaw/openclaw.json',
+  '/root/.openclaw/.registered',
+
   // Channel configs (HIGH priority)
-  '/root/.clawdbot/channels/**/config.json',
-  
+  '/root/.openclaw/channels/**/config.json',
+
   // Memory files (MEDIUM priority)
-  '/root/clawd/memory/*.md',
-  '/root/clawd/life/**/*.json',
+  '/root/openclaw/memory/*.md',
+  '/root/openclaw/life/**/*.json',
 ];
 
 /**
@@ -77,7 +77,7 @@ export const CRITICAL_PATHS = [
  */
 export const PATH_PRIORITY: Record<string, number> = {
   'credentials': 100,    // Credentials always first
-  'clawdbot.json': 90,   // Main config
+  'openclaw.json': 90,   // Main config
   '.registered': 80,     // Registration marker
   'channels': 70,        // Channel configs
   'memory': 50,          // Daily notes
@@ -110,7 +110,7 @@ export function isCriticalPath(filePath: string): boolean {
   
   // Check exact matches and patterns
   if (normalizedPath.includes('/credentials/')) return true;
-  if (normalizedPath.includes('clawdbot.json')) return true;
+  if (normalizedPath.includes('openclaw.json')) return true;
   if (normalizedPath.includes('.registered')) return true;
   if (normalizedPath.includes('/channels/') && normalizedPath.includes('config.json')) return true;
   

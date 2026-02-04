@@ -191,8 +191,8 @@ async function doSyncToR2(
   try {
     // Check file exists and has valid JSON with required fields
     const checkProc = await sandbox.startProcess(
-      'test -f /root/.clawdbot/clawdbot.json && ' +
-      'node -e "const c=JSON.parse(require(\'fs\').readFileSync(\'/root/.clawdbot/clawdbot.json\')); ' +
+      'test -f /root/.openclaw/openclaw.json && ' +
+      'node -e "const c=JSON.parse(require(\'fs\').readFileSync(\'/root/.openclaw/openclaw.json\')); ' +
       'if(!c.agents && !c.channels && !c.gateway) throw new Error(\'Empty config\'); console.log(\'ok\')"'
     );
     await waitForProcess(checkProc, 5000);
@@ -201,7 +201,7 @@ async function doSyncToR2(
       const result: SyncResult = {
         success: false,
         error: 'Sync aborted: config appears empty or invalid',
-        details: `Local clawdbot.json exists but lacks required fields. stderr: ${checkLogs.stderr?.slice(0, 200)}`,
+        details: `Local openclaw.json exists but lacks required fields. stderr: ${checkLogs.stderr?.slice(0, 200)}`,
         syncId,
         durationMs: Date.now() - startTime,
       };
@@ -223,7 +223,7 @@ async function doSyncToR2(
   // Check if a sync is already running to prevent pileup
   // This is critical because the cron runs every minute and rsync can hang on slow s3fs mounts
   try {
-    const checkProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.clawdbot" 2>/dev/null | head -1');
+    const checkProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.openclaw" 2>/dev/null | head -1');
     await waitForProcess(checkProc, 3000);
     const checkLogs = await checkProc.getLogs();
     if (checkLogs.stdout?.trim()) {
@@ -245,7 +245,7 @@ async function doSyncToR2(
   // Count files before sync for verification
   let fileCountBefore = 0;
   try {
-    const countProc = await sandbox.startProcess(`find /root/.clawdbot -type f 2>/dev/null | wc -l`);
+    const countProc = await sandbox.startProcess(`find /root/.openclaw -type f 2>/dev/null | wc -l`);
     await waitForProcess(countProc, 5000);
     const countLogs = await countProc.getLogs();
     fileCountBefore = parseInt(countLogs.stdout?.trim() || '0', 10);
@@ -256,9 +256,9 @@ async function doSyncToR2(
   // Run rsync to backup config and workspace to R2
   // Note: Use --no-times because s3fs doesn't support setting timestamps
   // Use && between commands to ensure they run sequentially and we can check overall success
-  // Backup both /root/.clawdbot/ (config) and /root/clawd/ (workspace including scripts, skills, etc.)
+  // Backup both /root/.openclaw/ (config) and /root/openclaw/ (workspace including scripts, skills, etc.)
   const timestamp = new Date().toISOString();
-  const syncCmd = `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${mountPath}/clawdbot/ && rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/clawd/ ${mountPath}/workspace/ 2>/dev/null; rsync_exit=$?; echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync; exit $rsync_exit`;
+  const syncCmd = `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.openclaw/ ${mountPath}/openclaw/ && rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/openclaw/ ${mountPath}/workspace/ 2>/dev/null; rsync_exit=$?; echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync; exit $rsync_exit`;
 
   try {
     const proc = await sandbox.startProcess(syncCmd);
@@ -310,7 +310,7 @@ async function doSyncToR2(
     // Count files after sync
     let fileCountAfter = 0;
     try {
-      const countProc = await sandbox.startProcess(`find ${mountPath}/clawdbot -type f 2>/dev/null | wc -l`);
+      const countProc = await sandbox.startProcess(`find ${mountPath}/openclaw -type f 2>/dev/null | wc -l`);
       await waitForProcess(countProc, 5000);
       const countLogs = await countProc.getLogs();
       fileCountAfter = parseInt(countLogs.stdout?.trim() || '0', 10);
@@ -394,10 +394,10 @@ export async function syncCriticalFilesToR2(
 
   // Sync only critical paths: credentials, config, .registered
   const criticalCmd = `
-    mkdir -p ${mountPath}/clawdbot/credentials &&
-    rsync -r --no-times --delete /root/.clawdbot/credentials/ ${mountPath}/clawdbot/credentials/ 2>/dev/null;
-    rsync -r --no-times --delete /root/.clawdbot/clawdbot.json ${mountPath}/clawdbot/clawdbot.json 2>/dev/null;
-    rsync -r --no-times --delete /root/.clawdbot/.registered ${mountPath}/clawdbot/.registered 2>/dev/null;
+    mkdir -p ${mountPath}/openclaw/credentials &&
+    rsync -r --no-times --delete /root/.openclaw/credentials/ ${mountPath}/openclaw/credentials/ 2>/dev/null;
+    rsync -r --no-times --delete /root/.openclaw/openclaw.json ${mountPath}/openclaw/openclaw.json 2>/dev/null;
+    rsync -r --no-times --delete /root/.openclaw/.registered ${mountPath}/openclaw/.registered 2>/dev/null;
     echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync-critical;
     exit 0
   `;
@@ -429,7 +429,7 @@ export async function syncCriticalFilesToR2(
       success: true,
       lastSync: timestamp,
       syncId,
-      fileCount: 3, // credentials dir, clawdbot.json, .registered
+      fileCount: 3, // credentials dir, openclaw.json, .registered
       rsyncExitCode: rsyncExitCode ?? 0,
       durationMs: Date.now() - startTime,
     };

@@ -286,7 +286,7 @@ describe('GET /api/admin/users/:userId', () => {
 
     vi.mocked(getSandbox).mockReturnValueOnce({
       listProcesses: vi.fn(async () => [
-        { id: 'p1', command: 'clawdbot gateway', status: 'running', exitCode: undefined },
+        { id: 'p1', command: 'openclaw gateway', status: 'running', exitCode: undefined },
       ]),
     } as unknown as Sandbox);
 
@@ -330,7 +330,7 @@ describe('POST /api/admin/users/:userId/restart', () => {
     const execCtx = createExecutionCtx();
 
     listProcessesMock.mockResolvedValueOnce([
-      { id: 'p1', command: 'clawdbot gateway', kill: vi.fn(async () => undefined) },
+      { id: 'p1', command: 'openclaw gateway', kill: vi.fn(async () => undefined) },
     ] as unknown as Process[]);
     startProcessMock.mockResolvedValueOnce(createMockProcess('locks cleared'));
 
@@ -897,7 +897,7 @@ describe('Unreachable duplicate admin route handlers', () => {
     bucket.list.mockResolvedValueOnce({
       objects: [
         { key: 'users/u1/secrets.json', size: 1 },
-        { key: 'users/u2/clawdbot/config.json', size: 1 },
+        { key: 'users/u2/openclaw/config.json', size: 1 },
       ],
     } as any);
 

@@ -251,7 +251,7 @@ describe('Super debug endpoints', () => {
       },
       {
         id: 'p2',
-        command: 'clawdbot devices list',
+        command: 'openclaw devices list',
         status: 'completed',
         startTime: new Date('2026-02-01T00:01:00Z'),
         exitCode: 0,
@@ -260,7 +260,7 @@ describe('Super debug endpoints', () => {
 
     const bucket = createMockR2Bucket({
       'users/u1/.last-sync': '2026-02-01T00:10:00Z',
-      'users/u1/clawdbot/config.json': JSON.stringify({ name: 'Bot', personality: 'hello'.repeat(50), model: 'test' }),
+      'users/u1/openclaw/config.json': JSON.stringify({ name: 'Bot', personality: 'hello'.repeat(50), model: 'test' }),
       'users/u1/secrets.json': JSON.stringify({ TELEGRAM_BOT_TOKEN: 'tg', OPENAI_API_KEY: '' }),
       'users/u1/somefile.txt': 'x',
     });
@@ -322,7 +322,7 @@ describe('Super debug endpoints', () => {
     vi.mocked(gateway.syncToR2).mockResolvedValueOnce({ success: true } as any);
 
     listProcessesMock.mockResolvedValueOnce([
-      { id: 'p1', command: 'clawdbot gateway', kill: vi.fn(async () => undefined) },
+      { id: 'p1', command: 'openclaw gateway', kill: vi.fn(async () => undefined) },
     ] as any);
 
     // Clear locks, doctor --fix

@@ -211,7 +211,7 @@ adminRouter.get('/users/:id/state', requireSuperAuth, async (c) => {
       
       // Check if gateway is running
       const gatewayProcess = processes.find((p: any) => 
-        p.command?.includes('clawdbot gateway') && 
+        p.command?.includes('openclaw gateway') && 
         (p.status === 'running' || p.status === 'starting')
       );
 
@@ -231,7 +231,7 @@ adminRouter.get('/users/:id/state', requireSuperAuth, async (c) => {
       // Try to get version from a running process
       if (status.state === 'active') {
         try {
-          const versionProc = await sandbox.startProcess('clawdbot --version');
+          const versionProc = await sandbox.startProcess('openclaw --version');
           await new Promise(r => setTimeout(r, 500));
           const logs = await versionProc.getLogs();
           const version = (logs.stdout || logs.stderr || '').trim();
@@ -393,7 +393,7 @@ adminRouter.post('/users/:id/wake', requireSuperAuth, async (c) => {
     try {
       const processes = await sandbox.listProcesses();
       existingProcess = processes.find((p: any) => 
-        p.command?.includes('clawdbot gateway') && 
+        p.command?.includes('openclaw gateway') && 
         (p.status === 'running' || p.status === 'starting')
       );
       
@@ -457,7 +457,7 @@ adminRouter.post('/users/:id/wake', requireSuperAuth, async (c) => {
       try {
         const processes = await sandbox.listProcesses();
         const gatewayProcess = processes.find((p: any) => 
-          p.command?.includes('clawdbot gateway') && 
+          p.command?.includes('openclaw gateway') && 
           p.status === 'running'
         );
         
@@ -505,7 +505,7 @@ async function withWake(env: any, userId: string, operation: () => Promise<Respo
   try {
     const processes = await sandbox.listProcesses();
     const gatewayRunning = processes.some((p: any) => 
-      p.command?.includes('clawdbot gateway') && 
+      p.command?.includes('openclaw gateway') && 
       p.status === 'running'
     );
     if (!gatewayRunning && processes.length === 0) {
@@ -543,7 +543,7 @@ async function withWake(env: any, userId: string, operation: () => Promise<Respo
       await new Promise(r => setTimeout(r, pollIntervalMs));
       try {
         const processes = await sandbox.listProcesses();
-        if (processes.some((p: any) => p.command?.includes('clawdbot gateway') && p.status === 'running')) {
+        if (processes.some((p: any) => p.command?.includes('openclaw gateway') && p.status === 'running')) {
           break;
         }
       } catch {}
@@ -892,7 +892,7 @@ adminRouter.post('/users/:id/config/reload', requireSuperAuth, async (c) => {
     try {
       // Trigger the container to reload config from R2
       // This uses a signal or special command to tell the gateway to reload
-      const reloadProc = await sandbox.startProcess('killall -HUP clawdbot 2>/dev/null || true');
+      const reloadProc = await sandbox.startProcess('killall -HUP openclaw 2>/dev/null || true');
       await new Promise(r => setTimeout(r, 1000));
       await reloadProc.getLogs();
 
@@ -920,9 +920,9 @@ adminRouter.get('/users/:id/config', requireSuperAuth, async (c) => {
   
   try {
     // Read from R2 first (R2-first pattern)
-    const configKey = `users/${userId}/clawdbot/clawdbot.json`;
+    const configKey = `users/${userId}/openclaw/openclaw.json`;
     const configObj = await c.env.MOLTBOT_BUCKET.get(configKey);
-    
+
     if (!configObj) {
       return c.json({
         userId,
@@ -961,7 +961,7 @@ adminRouter.get('/users/:id/config', requireSuperAuth, async (c) => {
 // PUT /api/super/users/:id/config - Update config in R2 (R2-first pattern)
 adminRouter.put('/users/:id/config', requireSuperAuth, async (c) => {
   const userId = c.req.param('id');
-  
+
   let config: any;
   try {
     config = await c.req.json();
@@ -971,8 +971,8 @@ adminRouter.put('/users/:id/config', requireSuperAuth, async (c) => {
 
   try {
     // Store old version for rollback capability
-    const configKey = `users/${userId}/clawdbot/clawdbot.json`;
-    const historyKey = `users/${userId}/clawdbot/clawdbot.json.history`;
+    const configKey = `users/${userId}/openclaw/openclaw.json`;
+    const historyKey = `users/${userId}/openclaw/openclaw.json.history`;
     
     // Get existing config for history
     try {
@@ -1019,15 +1019,15 @@ adminRouter.put('/users/:id/config', requireSuperAuth, async (c) => {
       
       // Write config to container as well
       try {
-        await sandbox.mkdir('/root/.clawdbot', { recursive: true });
-        await sandbox.writeFile('/root/.clawdbot/clawdbot.json', configText);
+        await sandbox.mkdir('/root/.openclaw', { recursive: true });
+        await sandbox.writeFile('/root/.openclaw/openclaw.json', configText);
       } catch (writeError) {
         console.log(`[CONFIG] Failed to write to container:`, writeError);
       }
 
       // Send reload signal
       try {
-        const reloadProc = await sandbox.startProcess('killall -HUP clawdbot 2>/dev/null || true');
+        const reloadProc = await sandbox.startProcess('killall -HUP openclaw 2>/dev/null || true');
         await new Promise(r => setTimeout(r, 500));
         await reloadProc.getLogs();
       } catch {
@@ -1056,9 +1056,9 @@ adminRouter.get('/users/:id/config/history', requireSuperAuth, async (c) => {
   const userId = c.req.param('id');
   
   try {
-    const historyKey = `users/${userId}/clawdbot/clawdbot.json.history`;
+    const historyKey = `users/${userId}/openclaw/openclaw.json.history`;
     const historyObj = await c.env.MOLTBOT_BUCKET.get(historyKey);
-    
+
     if (!historyObj) {
       return c.json({
         userId,
@@ -1107,9 +1107,9 @@ adminRouter.post('/users/:id/config/rollback', requireSuperAuth, async (c) => {
   }
 
   try {
-    const historyKey = `users/${userId}/clawdbot/clawdbot.json.history`;
+    const historyKey = `users/${userId}/openclaw/openclaw.json.history`;
     const historyObj = await c.env.MOLTBOT_BUCKET.get(historyKey);
-    
+
     if (!historyObj) {
       return c.json({
         userId,
@@ -1138,8 +1138,8 @@ adminRouter.post('/users/:id/config/rollback', requireSuperAuth, async (c) => {
     }
 
     const targetConfig = history[historyIndex].config;
-    const configKey = `users/${userId}/clawdbot/clawdbot.json`;
-    
+    const configKey = `users/${userId}/openclaw/openclaw.json`;
+
     // Save current as new history entry
     const currentObj = await c.env.MOLTBOT_BUCKET.get(configKey);
     if (currentObj) {
@@ -1167,9 +1167,9 @@ adminRouter.post('/users/:id/config/rollback', requireSuperAuth, async (c) => {
       const sandbox = await getUserSandbox(c.env, userId, true);
       
       try {
-        await sandbox.writeFile('/root/.clawdbot/clawdbot.json', configText);
+        await sandbox.writeFile('/root/.openclaw/openclaw.json', configText);
         
-        const reloadProc = await sandbox.startProcess('killall -HUP clawdbot 2>/dev/null || true');
+        const reloadProc = await sandbox.startProcess('killall -HUP openclaw 2>/dev/null || true');
         await new Promise(r => setTimeout(r, 500));
         await reloadProc.getLogs();
       } catch {
@@ -1431,7 +1431,7 @@ adminRouter.post('/users/:id/message', requireSuperAuth, async (c) => {
       // Trigger the gateway to process the message
       // This simulates what happens when a real message arrives
       const triggerProc = await sandbox.startProcess(
-        `cd /root/clawd && echo '${JSON.stringify(messagePayload)}' | clawdbot message --stdin --session "${messageSessionKey}" --from "${impersonatedUserId}" 2>&1 || echo "Message queued for processing"`
+        `cd /root/openclaw && echo '${JSON.stringify(messagePayload)}' | openclaw message --stdin --session "${messageSessionKey}" --from "${impersonatedUserId}" 2>&1 || echo "Message queued for processing"`
       );
       
       await new Promise(r => setTimeout(r, 500));

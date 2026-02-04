@@ -102,7 +102,7 @@ describe('mountR2Storage', () => {
       expect(result).toBe(true);
       expect(mountBucketMock).toHaveBeenCalledWith(
         'moltbot-e2e-test123',
-        '/data/moltbot',
+        '/data/openclaw',
         expect.any(Object)
       );
     });

@@ -53,7 +53,7 @@ describe('syncToR2', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Sync aborted: config appears empty or invalid');
-      expect(result.details).toContain('Local clawdbot.json exists');
+      expect(result.details).toContain('Local openclaw.json exists');
     });
   });
 
@@ -163,7 +163,7 @@ describe('syncToR2', () => {
       expect(rsyncCall).toContain('rsync');
       expect(rsyncCall).toContain('--no-times');
       expect(rsyncCall).toContain('--delete');
-      expect(rsyncCall).toContain('/root/.clawdbot/');
+      expect(rsyncCall).toContain('/root/.openclaw/');
       expect(rsyncCall).toContain('/data/openclaw/');
       // Should include sync ID in the timestamp file
       expect(rsyncCall).toMatch(/echo "sync-\d+-[a-z0-9]+\|/);

@@ -79,16 +79,16 @@ export function buildEnvVars(env: MoltbotEnv, userGatewayToken?: string, userId?
   } else if (env.ANTHROPIC_BASE_URL) {
     envVars.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL;
   }
-  // Map gateway token to CLAWDBOT_GATEWAY_TOKEN (container expects this name)
+  // Map gateway token to OPENCLAW_GATEWAY_TOKEN (container expects this name)
   // Use per-user derived token if provided, otherwise fall back to master token
   const masterToken = getGatewayMasterToken(env);
   if (userGatewayToken) {
-    envVars.CLAWDBOT_GATEWAY_TOKEN = userGatewayToken;
+    envVars.OPENCLAW_GATEWAY_TOKEN = userGatewayToken;
   } else if (masterToken) {
-    envVars.CLAWDBOT_GATEWAY_TOKEN = masterToken;
+    envVars.OPENCLAW_GATEWAY_TOKEN = masterToken;
   }
-  if (env.DEV_MODE) envVars.CLAWDBOT_DEV_MODE = env.DEV_MODE; // Pass DEV_MODE as CLAWDBOT_DEV_MODE to container
-  if (env.CLAWDBOT_BIND_MODE) envVars.CLAWDBOT_BIND_MODE = env.CLAWDBOT_BIND_MODE;
+  if (env.DEV_MODE) envVars.OPENCLAW_DEV_MODE = env.DEV_MODE;
+  if (env.CLAWDBOT_BIND_MODE) envVars.OPENCLAW_BIND_MODE = env.CLAWDBOT_BIND_MODE;
   // Channel tokens (Telegram, Discord, Slack) are managed via the bot's control UI,
   // stored in config, and persisted to R2. Not injected via env vars.
   if (env.CDP_SECRET) envVars.CDP_SECRET = env.CDP_SECRET;

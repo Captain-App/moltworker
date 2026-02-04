@@ -48,12 +48,14 @@ export async function findExistingMoltbotProcess(sandbox: Sandbox): Promise<Proc
   try {
     const processes = await sandbox.listProcesses();
     for (const proc of processes) {
-      // Only match the gateway process, not CLI commands like "clawdbot devices list"
-      // Note: CLI is still named "clawdbot" until upstream renames it
-      const isGatewayProcess = 
+      // Only match the gateway process, not CLI commands like "openclaw devices list"
+      const isGatewayProcess =
         proc.command.includes('start-moltbot.sh') ||
-        proc.command.includes('clawdbot gateway');
-      const isCliCommand = 
+        proc.command.includes('openclaw gateway') ||
+        proc.command.includes('clawdbot gateway'); // legacy compat
+      const isCliCommand =
+        proc.command.includes('openclaw devices') ||
+        proc.command.includes('openclaw --version') ||
         proc.command.includes('clawdbot devices') ||
         proc.command.includes('clawdbot --version');
       
@@ -184,7 +186,7 @@ async function doEnsureMoltbotGateway(sandbox: Sandbox, env: MoltbotEnv, userId:
   console.log(`[Gateway] userId param: ${userId || '(not set)'}`);
   const envVars = buildEnvVars(env, userGatewayToken, userId);
   console.log(`[Gateway] OPENCLAW_USER_ID in envVars: ${envVars.OPENCLAW_USER_ID || '(not set)'}`);
-  console.log(`[Gateway] CLAWDBOT_GATEWAY_TOKEN in envVars: ${envVars.CLAWDBOT_GATEWAY_TOKEN ? '(set)' : '(not set)'}`);
+  console.log(`[Gateway] OPENCLAW_GATEWAY_TOKEN in envVars: ${envVars.OPENCLAW_GATEWAY_TOKEN ? '(set)' : '(not set)'}`);
   console.log(`[Gateway] R2_ACCESS_KEY_ID in envVars: ${envVars.R2_ACCESS_KEY_ID ? '(set)' : '(not set)'}`);
   console.log(`[Gateway] ANTHROPIC_API_KEY in envVars: ${envVars.ANTHROPIC_API_KEY ? '(set)' : '(not set)'}`);
   console.log(`[Gateway] AI_GATEWAY_BASE_URL in envVars: ${envVars.AI_GATEWAY_BASE_URL || '(not set)'}`);

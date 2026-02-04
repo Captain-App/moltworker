@@ -198,7 +198,7 @@ publicRoutes.get('/api/super/users/:userId/inspect', async (c) => {
       }
 
       // Check config/personality
-      const configFile = await c.env.MOLTBOT_BUCKET.get(`users/${userId}/clawdbot/config.json`);
+      const configFile = await c.env.MOLTBOT_BUCKET.get(`users/${userId}/openclaw/config.json`);
       if (configFile) {
         try {
           const config = JSON.parse(await configFile.text());
@@ -252,8 +252,8 @@ publicRoutes.get('/api/super/users/:userId/files', async (c) => {
 
     // Run ls commands to check file system state
     let commands = [
-      'ls -la /root/.clawdbot/ 2>&1 | head -20',
-      'cat /root/.clawdbot/clawdbot.json 2>&1 | head -50',
+      'ls -la /root/.openclaw/ 2>&1 | head -20',
+      'cat /root/.openclaw/openclaw.json 2>&1 | head -50',
       'mount | grep s3fs',
       'ls -la /data/openclaw/ 2>&1 | head -10',
     ];
@@ -261,8 +261,8 @@ publicRoutes.get('/api/super/users/:userId/files', async (c) => {
     // If sync requested, add sync commands
     if (doSync) {
       commands = commands.concat([
-        `mkdir -p ${mountPath}/clawdbot ${mountPath}/skills`,
-        `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${mountPath}/clawdbot/ 2>&1`,
+        `mkdir -p ${mountPath}/openclaw ${mountPath}/skills`,
+        `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.openclaw/ ${mountPath}/openclaw/ 2>&1`,
         `date -Iseconds > ${mountPath}/.last-sync`,
         `cat ${mountPath}/.last-sync`,
         `ls -la ${mountPath}/ 2>&1`,
@@ -312,11 +312,11 @@ publicRoutes.get('/api/super/users/:userId/sync', async (c) => {
     // Run sync commands manually with full debug output
     const commands = [
       // Check source exists
-      'test -f /root/.clawdbot/clawdbot.json && echo "source_ok" || echo "source_missing"',
+      'test -f /root/.openclaw/openclaw.json && echo "source_ok" || echo "source_missing"',
       // Create target directory
-      `mkdir -p ${mountPath}/clawdbot ${mountPath}/skills`,
+      `mkdir -p ${mountPath}/openclaw ${mountPath}/skills`,
       // Run rsync with verbose
-      `rsync -rv --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${mountPath}/clawdbot/ 2>&1`,
+      `rsync -rv --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.openclaw/ ${mountPath}/openclaw/ 2>&1`,
       // Write timestamp
       `date -Iseconds > ${mountPath}/.last-sync && cat ${mountPath}/.last-sync`,
       // Verify
@@ -429,11 +429,11 @@ publicRoutes.get('/api/super/users/:userId/restart', async (c) => {
     await new Promise(r => setTimeout(r, 2000));
 
     // Clear locks
-    await sandbox.startProcess('rm -f /tmp/clawdbot-gateway.lock /root/.clawdbot/gateway.lock 2>/dev/null');
+    await sandbox.startProcess('rm -f /tmp/openclaw-gateway.lock /root/.openclaw/gateway.lock 2>/dev/null');
     await new Promise(r => setTimeout(r, 500));
 
     // Run doctor --fix first
-    const doctorProc = await sandbox.startProcess('clawdbot doctor --fix --yes 2>&1');
+    const doctorProc = await sandbox.startProcess('openclaw doctor --fix --yes 2>&1');
     let attempts = 0;
     while (doctorProc.status === 'running' && attempts < 30) {
       await new Promise(r => setTimeout(r, 500));

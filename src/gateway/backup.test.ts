@@ -99,7 +99,7 @@ describe('createDailyBackup', () => {
     vi.setSystemTime(new Date('2026-02-01T12:00:00Z'));
 
     const bucket = createInMemoryR2Bucket({
-      'backups/.last-daily-backup': { text: '2026-02-01' },
+      'backups/.last-rolling-backup': { text: '2026-02-01' },
     });
 
     const env = createMockEnv({ MOLTBOT_BUCKET: bucket as any });
@@ -116,9 +116,9 @@ describe('createDailyBackup', () => {
 
     const bucket = createInMemoryR2Bucket({
       // User data
-      'users/u1/clawdbot/config.json': { text: '{"ok":true}', customMetadata: { a: '1' } },
+      'users/u1/openclaw/config.json': { text: '{"ok":true}', customMetadata: { a: '1' } },
       'users/u1/secrets.json': { text: '{"TELEGRAM_BOT_TOKEN":"x"}' },
-      'users/u2/clawdbot/config.json': { text: '{"ok":true}' },
+      'users/u2/openclaw/config.json': { text: '{"ok":true}' },
       // Directory marker (size 0), should be skipped
       'users/u2/': { text: '' },
 
@@ -138,12 +138,12 @@ describe('createDailyBackup', () => {
     expect(result.filesBackedUp).toBe(3);
 
     // New backup keys exist
-    expect(bucket._store.has('backups/2026-02-01/users/u1/clawdbot/config.json')).toBe(true);
+    expect(bucket._store.has('backups/2026-02-01/users/u1/openclaw/config.json')).toBe(true);
     expect(bucket._store.has('backups/2026-02-01/users/u1/secrets.json')).toBe(true);
-    expect(bucket._store.has('backups/2026-02-01/users/u2/clawdbot/config.json')).toBe(true);
+    expect(bucket._store.has('backups/2026-02-01/users/u2/openclaw/config.json')).toBe(true);
 
     // Marker updated
-    const marker = await bucket.get('backups/.last-daily-backup');
+    const marker = await bucket.get('backups/.last-rolling-backup');
     expect(await marker?.text()).toBe('2026-02-01');
 
     // Old backups deleted

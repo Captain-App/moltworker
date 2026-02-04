@@ -87,17 +87,17 @@ export async function listMissingCriticalFiles(
   
   try {
     // Check for credentials directory in R2
-    const credentialsPrefix = `${r2Prefix}/clawdbot/credentials/`;
+    const credentialsPrefix = `${r2Prefix}/openclaw/credentials/`;
     const credentialsList = await env.MOLTBOT_BUCKET.list({
       prefix: credentialsPrefix,
     });
     
     // Check for main config file
-    const configKey = `${r2Prefix}/clawdbot/clawdbot.json`;
+    const configKey = `${r2Prefix}/openclaw/openclaw.json`;
     const configExists = await env.MOLTBOT_BUCKET.head(configKey);
     
     if (!configExists) {
-      result.missingConfig.push('clawdbot.json');
+      result.missingConfig.push('openclaw.json');
       result.allCriticalFilesPresent = false;
     }
     
@@ -172,21 +172,21 @@ export async function verifySyncToR2(
     // Add missing critical files to result
     for (const missing of criticalStatus.missingConfig) {
       result.missingCriticalFiles.push({
-        path: `${r2Prefix}/clawdbot/${missing}`,
+        path: `${r2Prefix}/openclaw/${missing}`,
         priority: 'critical',
       });
     }
     
-    // List all files in R2 clawdbot directory
+    // List all files in R2 openclaw directory
     const r2Files = await env.MOLTBOT_BUCKET.list({
-      prefix: `${r2Prefix}/clawdbot/`,
+      prefix: `${r2Prefix}/openclaw/`,
     });
     
     result.filesChecked = r2Files.objects.length;
     
     // Check for expected critical files
     const expectedCriticalFiles = [
-      `${r2Prefix}/clawdbot/clawdbot.json`,
+      `${r2Prefix}/openclaw/openclaw.json`,
       `${r2Prefix}/.registered`,
     ];
     
@@ -264,7 +264,7 @@ export async function verifySandboxSync(
   try {
     // Get list of local critical files
     const localFilesProc = await sandbox.startProcess(
-      `find /root/.clawdbot -type f \( -name "*.json" -o -name ".registered" \) 2>/dev/null | head -50`
+      `find /root/.openclaw -type f \( -name "*.json" -o -name ".registered" \) 2>/dev/null | head -50`
     );
     
     // Wait with timeout
@@ -287,8 +287,8 @@ export async function verifySandboxSync(
       if (!isCriticalPath(localPath)) continue;
       
       // Convert local path to R2 key
-      const relativePath = localPath.replace('/root/.clawdbot/', '');
-      const r2Key = `${r2Prefix}/clawdbot/${relativePath}`;
+      const relativePath = localPath.replace('/root/.openclaw/', '');
+      const r2Key = `${r2Prefix}/openclaw/${relativePath}`;
       
       // Check if exists in R2
       const r2Head = await env.MOLTBOT_BUCKET.head(r2Key);

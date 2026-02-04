@@ -750,13 +750,14 @@ window.__GATEWAY_TOKEN__ = '${gatewayToken}';
 if ('${gatewayToken}') {
   // Store token in localStorage where Control UI looks for it
   try {
-    localStorage.setItem('clawdbot-gateway-token', '${gatewayToken}');
+    localStorage.setItem('openclaw-gateway-token', '${gatewayToken}');
     localStorage.setItem('gateway-token', '${gatewayToken}');
-    // Also try the Control UI's config storage format
-    var config = JSON.parse(localStorage.getItem('clawdbot-control-ui-config') || '{}');
+    // Also try the Control UI's config storage format (both old and new keys for compat)
+    var config = JSON.parse(localStorage.getItem('openclaw-control-ui-config') || localStorage.getItem('clawdbot-control-ui-config') || '{}');
     config.gatewayToken = '${gatewayToken}';
     config.token = '${gatewayToken}';
-    localStorage.setItem('clawdbot-control-ui-config', JSON.stringify(config));
+    localStorage.setItem('openclaw-control-ui-config', JSON.stringify(config));
+    localStorage.setItem('clawdbot-control-ui-config', JSON.stringify(config)); // legacy compat
     console.log('[Injected] Set gateway token in localStorage');
   } catch(e) { console.error('[Injected] localStorage error:', e); }
 }
@@ -806,7 +807,7 @@ if ('${gatewayToken}') {
   if (document.body) document.body.appendChild(btn);
 })();
 
-// Patch WebSocket to auto-add token to clawdbot gateway connections
+// Patch WebSocket to auto-add token to gateway connections
 (function() {
   var OriginalWebSocket = window.WebSocket;
   window.WebSocket = function(url, protocols) {
@@ -908,7 +909,7 @@ async function scheduled(
       if (processes.length === 0) {
         // No processes - check if user has Telegram configured and auto-start if so
         try {
-          const configKey = `users/${userId}/clawdbot/clawdbot.json`;
+          const configKey = `users/${userId}/openclaw/openclaw.json`;
           const configObj = await env.MOLTBOT_BUCKET.get(configKey);
           if (configObj) {
             const configText = await configObj.text();

@@ -47,7 +47,7 @@ describe('Admin API Robustness Improvements', () => {
   describe('withWakeAndRetry', () => {
     it('should succeed on first attempt if container is ready', async () => {
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -64,7 +64,7 @@ describe('Admin API Robustness Improvements', () => {
     it('should wake container if no processes exist', async () => {
       mockSandbox.listProcesses
         .mockResolvedValueOnce([]) // First check: empty
-        .mockResolvedValueOnce([{ id: '1', command: 'clawdbot gateway', status: 'running' }]);
+        .mockResolvedValueOnce([{ id: '1', command: 'openclaw gateway', status: 'running' }]);
       
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -81,7 +81,7 @@ describe('Admin API Robustness Improvements', () => {
         .mockRejectedValueOnce(new Error('sandbox_not_found'))
         .mockRejectedValueOnce(new Error('timeout'))
         .mockResolvedValueOnce([
-          { id: '1', command: 'clawdbot gateway', status: 'running' }
+          { id: '1', command: 'openclaw gateway', status: 'running' }
         ]);
 
       // Should retry 3 times, succeed on 3rd
@@ -97,7 +97,7 @@ describe('Admin API Robustness Improvements', () => {
   describe('File API with R2-First', () => {
     it('should read from R2 when container is hibernating', async () => {
       const userId = 'test-user';
-      const path = '/.clawdbot/config.json';
+      const path = '/.openclaw/config.json';
       const r2Content = '{"test": true}';
       
       // R2 has the file
@@ -123,7 +123,7 @@ describe('Admin API Robustness Improvements', () => {
       
       // Container has file
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -144,7 +144,7 @@ describe('Admin API Robustness Improvements', () => {
       const content = 'test content';
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -172,7 +172,7 @@ describe('Admin API Robustness Improvements', () => {
       const command = 'sleep 60';
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockImplementation(() => new Promise(() => {})), // Never resolves
@@ -188,7 +188,7 @@ describe('Admin API Robustness Improvements', () => {
       const command = 'long-running-task';
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         id: 'proc-123',
@@ -205,7 +205,7 @@ describe('Admin API Robustness Improvements', () => {
       const userId = 'test-user';
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running', startTime: new Date() }
+        { id: '1', command: 'openclaw gateway', status: 'running', startTime: new Date() }
       ]);
       mockSandbox.startProcess.mockResolvedValue({
         waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -240,7 +240,7 @@ describe('Admin API Robustness Improvements', () => {
       ];
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.readFile.mockResolvedValue({ success: true, content: 'data' });
       mockSandbox.writeFile.mockResolvedValue({ success: true });
@@ -257,7 +257,7 @@ describe('Admin API Robustness Improvements', () => {
       ];
       
       mockSandbox.listProcesses.mockResolvedValue([
-        { id: '1', command: 'clawdbot gateway', status: 'running' }
+        { id: '1', command: 'openclaw gateway', status: 'running' }
       ]);
       mockSandbox.readFile
         .mockResolvedValueOnce({ success: true, content: 'data' })
@@ -296,7 +296,7 @@ function createMockSandbox(state: 'running' | 'hibernating' | 'starting' | 'empt
     case 'running':
       return {
         listProcesses: vi.fn().mockResolvedValue([
-          { id: '1', command: 'clawdbot gateway', status: 'running', startTime: new Date() }
+          { id: '1', command: 'openclaw gateway', status: 'running', startTime: new Date() }
         ]),
         startProcess: vi.fn().mockResolvedValue({
           waitForExit: vi.fn().mockResolvedValue({ exitCode: 0 }),
@@ -311,7 +311,7 @@ function createMockSandbox(state: 'running' | 'hibernating' | 'starting' | 'empt
     case 'starting':
       return {
         listProcesses: vi.fn().mockResolvedValue([
-          { id: '1', command: 'clawdbot gateway', status: 'starting' }
+          { id: '1', command: 'openclaw gateway', status: 'starting' }
         ]),
         startProcess: vi.fn().mockResolvedValue({
           waitForExit: vi.fn().mockImplementation(() => new Promise(() => {})),

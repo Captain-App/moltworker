@@ -1,6 +1,6 @@
 FROM docker.io/cloudflare/sandbox:0.7.0
 
-# Install Node.js 22 (required by clawdbot) and rsync (for R2 backup sync)
+# Install Node.js 22 (required by openclaw) and rsync (for R2 backup sync)
 # The base image has Node 20, we need to replace it with Node 22
 # Using direct binary download for reliability
 ENV NODE_VERSION=22.13.1
@@ -20,17 +20,16 @@ RUN ARCH="$(dpkg --print-architecture)" \
 # Install pnpm globally
 RUN npm install -g pnpm
 
-# Install moltbot (CLI is still named clawdbot until upstream renames)
-# Pin to specific version for reproducible builds
-RUN npm install -g clawdbot@2026.1.24-3 \
-    && clawdbot --version
+# Install openclaw from Captain-App fork (v2026.2.3, includes Kimi K2.5 support)
+RUN npm install -g openclaw@https://github.com/Captain-App/openclaw.git \
+    && openclaw --version
 
-# Create moltbot directories (paths still use clawdbot until upstream renames)
-# Templates are stored in /root/.clawdbot-templates for initialization
-RUN mkdir -p /root/.clawdbot \
-    && mkdir -p /root/.clawdbot-templates \
-    && mkdir -p /root/clawd \
-    && mkdir -p /root/clawd/skills
+# Create openclaw directories
+# Templates are stored in /root/.openclaw-templates for initialization
+RUN mkdir -p /root/.openclaw \
+    && mkdir -p /root/.openclaw-templates \
+    && mkdir -p /root/openclaw \
+    && mkdir -p /root/openclaw/skills
 
 # Copy startup script
 # Build cache bust: 2026-02-01-v10-restore-once-at-start
@@ -39,13 +38,13 @@ COPY start-moltbot.sh /usr/local/bin/start-moltbot.sh
 RUN chmod +x /usr/local/bin/start-moltbot.sh
 
 # Copy default configuration template
-COPY moltbot.json.template /root/.clawdbot-templates/moltbot.json.template
+COPY moltbot.json.template /root/.openclaw-templates/moltbot.json.template
 
 # Copy custom skills
-COPY skills/ /root/clawd/skills/
+COPY skills/ /root/openclaw/skills/
 
 # Set working directory
-WORKDIR /root/clawd
+WORKDIR /root/openclaw
 
 # Expose the gateway port
 EXPOSE 18789
