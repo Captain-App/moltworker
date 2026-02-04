@@ -1950,4 +1950,216 @@ debug.get('/admin/users/:userId/sessions/:sessionId/messages', async (c) => {
   }
 });
 
+// ============================================================================
+// CONTAINER ADMIN TOOLS - Execute commands and get logs from user containers
+// ============================================================================
+
+// GET /debug/admin/users/:userId/logs - Get logs from a specific user's container process
+// Query params:
+//   - processId: specific process ID (optional, defaults to most recent start-moltbot)
+//   - lines: number of lines to return (optional, defaults to 100)
+debug.get('/admin/users/:userId/logs', async (c) => {
+  const userId = c.req.param('userId');
+  const processId = c.req.query('processId');
+  const lines = parseInt(c.req.query('lines') || '100', 10);
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const sandboxName = `openclaw-${userId}`;
+  const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+
+  try {
+    let targetProcess = null;
+
+    if (processId) {
+      // Get specific process
+      const processes = await sandbox.listProcesses();
+      targetProcess = processes.find(p => p.id === processId);
+      if (!targetProcess) {
+        return c.json({ error: `Process ${processId} not found`, userId }, 404);
+      }
+    } else {
+      // Find most recent start-moltbot or openclaw gateway process
+      const processes = await sandbox.listProcesses();
+      targetProcess = processes
+        .filter(p => p.command.includes('start-moltbot') || p.command.includes('openclaw gateway'))
+        .sort((a, b) => (b.startTime?.getTime() || 0) - (a.startTime?.getTime() || 0))[0];
+      
+      if (!targetProcess) {
+        return c.json({ error: 'No moltbot gateway process found', userId }, 404);
+      }
+    }
+
+    const logs = await targetProcess.getLogs();
+    
+    // Truncate to requested lines
+    const stdoutLines = (logs.stdout || '').split('\n');
+    const stderrLines = (logs.stderr || '').split('\n');
+    
+    return c.json({
+      userId,
+      processId: targetProcess.id,
+      processStatus: targetProcess.status,
+      command: targetProcess.command,
+      startTime: targetProcess.startTime?.toISOString(),
+      stdout: stdoutLines.slice(-lines).join('\n'),
+      stderr: stderrLines.slice(-lines).join('\n'),
+      totalStdoutLines: stdoutLines.length,
+      totalStderrLines: stderrLines.length,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage, userId }, 500);
+  }
+});
+
+// POST /debug/admin/users/:userId/exec - Execute a command on a user's container
+// Body: { "command": "ls -la /root/.openclaw/", "timeoutMs": 10000 }
+debug.post('/admin/users/:userId/exec', async (c) => {
+  const userId = c.req.param('userId');
+  const body = await c.req.json().catch(() => ({}));
+  const command = body.command;
+  const timeoutMs = body.timeoutMs || 30000;
+  
+  if (!command) {
+    return c.json({ error: 'command required in body', userId }, 400);
+  }
+
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const sandboxName = `openclaw-${userId}`;
+  const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+
+  try {
+    console.log(`[Exec] Running command for ${userId}: ${command}`);
+    const proc = await sandbox.startProcess(command);
+    
+    // Wait for completion or timeout
+    const startTime = Date.now();
+    while (proc.status === 'running' && (Date.now() - startTime) < timeoutMs) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const logs = await proc.getLogs();
+    const duration = Date.now() - startTime;
+    
+    return c.json({
+      userId,
+      command,
+      status: proc.status,
+      exitCode: proc.exitCode,
+      durationMs: duration,
+      timedOut: proc.status === 'running',
+      stdout: logs.stdout || '',
+      stderr: logs.stderr || '',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage, userId, command }, 500);
+  }
+});
+
+// GET /debug/admin/users/:userId/status - Get comprehensive container status
+debug.get('/admin/users/:userId/status', async (c) => {
+  const userId = c.req.param('userId');
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const sandboxName = `openclaw-${userId}`;
+  const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+
+  try {
+    const processes = await sandbox.listProcesses();
+    
+    // Categorize processes
+    const gatewayProcs = processes.filter(p => 
+      p.command.includes('openclaw gateway') || p.command.includes('start-moltbot')
+    );
+    const runningProcs = processes.filter(p => p.status === 'running');
+    const failedProcs = processes.filter(p => p.status === 'failed');
+    
+    // Get most recent gateway process
+    const latestGateway = gatewayProcs
+      .sort((a, b) => (b.startTime?.getTime() || 0) - (a.startTime?.getTime() || 0))[0];
+
+    return c.json({
+      userId,
+      sandboxName,
+      summary: {
+        totalProcesses: processes.length,
+        running: runningProcs.length,
+        failed: failedProcs.length,
+        gatewayProcesses: gatewayProcs.length,
+        hasRunningGateway: runningProcs.some(p => 
+          p.command.includes('openclaw gateway') || p.command.includes('start-moltbot')
+        ),
+      },
+      latestGateway: latestGateway ? {
+        id: latestGateway.id,
+        status: latestGateway.status,
+        startTime: latestGateway.startTime?.toISOString(),
+        command: latestGateway.command,
+      } : null,
+      recentProcesses: processes
+        .sort((a, b) => (b.startTime?.getTime() || 0) - (a.startTime?.getTime() || 0))
+        .slice(0, 10)
+        .map(p => ({
+          id: p.id,
+          status: p.status,
+          command: p.command.substring(0, 80),
+          startTime: p.startTime?.toISOString(),
+        })),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage, userId }, 500);
+  }
+});
+
+// POST /debug/admin/users/:userId/config/read - Read a config file from container
+debug.post('/admin/users/:userId/config/read', async (c) => {
+  const userId = c.req.param('userId');
+  const body = await c.req.json().catch(() => ({}));
+  const path = body.path || '/root/.openclaw/openclaw.json';
+  
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const sandboxName = `openclaw-${userId}`;
+  const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
+
+  try {
+    const proc = await sandbox.startProcess(`cat ${path}`);
+    
+    let attempts = 0;
+    while (proc.status === 'running' && attempts < 20) {
+      await new Promise(r => setTimeout(r, 200));
+      attempts++;
+    }
+
+    const logs = await proc.getLogs();
+    const content = logs.stdout || '';
+    
+    // Try to parse as JSON if it looks like JSON
+    let parsed = null;
+    if (content.trim().startsWith('{') || content.trim().startsWith('[')) {
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        // Not valid JSON
+      }
+    }
+
+    return c.json({
+      userId,
+      path,
+      exists: content.length > 0,
+      size: content.length,
+      content: parsed || content,
+      isJson: !!parsed,
+      stderr: logs.stderr || '',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage, userId, path }, 500);
+  }
+});
+
 export { debug };
