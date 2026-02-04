@@ -9,7 +9,7 @@ import type { MoltbotEnv } from '../types';
 // Feature flag - controlled via env.TIERED_ROUTING_ENABLED
 // When false (default), all users use legacy 'Sandbox' binding
 // When true, migrated users use tiered bindings based on USER_TIER_MAP
-const TIERED_ROUTING_ENABLED = false; // Will be overridden by env var
+const TIERED_ROUTING_ENABLED = true; // Tiered routing enabled - 2026-02-04
 
 /**
  * User ID to instance tier mapping
@@ -24,15 +24,19 @@ const USER_TIER_MAP: Record<string, 1 | 2 | 3> = {
   // Josh - active user (standard-2)
   '81bf6a68-28fe-48ef-b257-f9ad013e6298': 2,
   
+  // Miles - power user, AI learning workspace (standard-2)
+  'fe56406b-a723-43cf-9f19-ba2ffcb135b0': 2,
+  
   // Default: all other users get standard-1
 };
 
 // Track which users have been migrated to tiered namespaces
 // Migration requires: R2 sync → stop old → start new → verify
 const MIGRATED_USERS = new Set<string>([
-  // Add user IDs here AFTER successful migration
-  // '32c7100e-c6ce-4cf8-8b64-edf4ac3b760b', // Jack - migrated
-  // '81bf6a68-28fe-48ef-b257-f9ad013e6298', // Josh - migrated
+  // Tiered routing rollout - 2026-02-04
+  '32c7100e-c6ce-4cf8-8b64-edf4ac3b760b', // Jack - standard-3
+  '81bf6a68-28fe-48ef-b257-f9ad013e6298', // Josh - standard-2
+  'fe56406b-a723-43cf-9f19-ba2ffcb135b0', // Miles - standard-2
 ]);
 
 /**
