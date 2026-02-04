@@ -49,3 +49,4 @@ WORKDIR /root/openclaw
 
 # Expose the gateway port
 EXPOSE 18789
+# Build cache bust: Wed Feb  4 22:24:32 GMT 2026
