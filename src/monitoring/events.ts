@@ -72,7 +72,7 @@ export function logSyncEvent(
   userId: string,
   success: boolean,
   durationMs: number,
-  details?: { fileCount?: number; error?: string; syncId?: string }
+  details?: { fileCount?: number; error?: string; syncId?: string; criticalSyncDurationMs?: number }
 ): void {
   logEvent({
     type: 'sync',

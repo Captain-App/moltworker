@@ -3,6 +3,8 @@ import type { MoltbotEnv } from '../types';
 import { MOLTBOT_PORT, STARTUP_TIMEOUT_MS } from '../config';
 import { buildEnvVars, deriveUserGatewayToken, getGatewayMasterToken } from './env';
 import { mountR2Storage } from './r2';
+import { syncBeforeShutdown, syncToR2 } from './sync';
+import { isBackupFeatureEnabled } from '../config/backup';
 
 /**
  * In-memory lock to prevent concurrent gateway starts for the same sandbox.
@@ -237,4 +239,107 @@ async function doEnsureMoltbotGateway(sandbox: Sandbox, env: MoltbotEnv, userId:
   console.log('[Gateway] Verifying gateway health...');
   
   return process;
+}
+
+/**
+ * Restart a user's container with pre-shutdown sync.
+ * 
+ * This function:
+ * 1. Triggers pre-shutdown sync to ensure data is saved to R2
+ * 2. Waits for sync to complete (with timeout)
+ * 3. Kills all processes
+ * 4. Restarts the gateway
+ * 
+ * @param sandbox - The sandbox instance
+ * @param env - Worker environment bindings
+ * @param userId - The user ID to restart
+ * @returns Promise that resolves when restart is initiated
+ */
+export async function restartContainer(
+  sandbox: Sandbox,
+  env: MoltbotEnv,
+  userId: string
+): Promise<{ success: boolean; syncResult?: { success: boolean; error?: string }; message: string }> {
+  const r2Prefix = `users/${userId}`;
+  
+  console.log(`[Restart] Initiating restart for user ${userId.slice(0, 8)}...`);
+
+  // Step 1: Pre-shutdown sync (if feature enabled)
+  let syncResult: { success: boolean; error?: string } = { success: true };
+  
+  if (isBackupFeatureEnabled('SHUTDOWN_SYNC')) {
+    console.log(`[Restart] Running pre-shutdown sync for ${userId.slice(0, 8)}...`);
+    try {
+      const result = await syncBeforeShutdown(sandbox, env, {
+        r2Prefix,
+        mode: 'blocking',
+        timeoutMs: 30000, // 30s max for pre-shutdown sync
+        emergency: true,
+      });
+      
+      syncResult = {
+        success: result.success,
+        error: result.error,
+      };
+      
+      if (result.success) {
+        console.log(`[Restart] Pre-shutdown sync completed for ${userId.slice(0, 8)}... in ${result.durationMs}ms`);
+      } else {
+        console.error(`[Restart] Pre-shutdown sync failed for ${userId.slice(0, 8)}...:`, result.error);
+        // Continue with restart anyway - we don't want to block restart indefinitely
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[Restart] Pre-shutdown sync error for ${userId.slice(0, 8)}...:`, errorMsg);
+      syncResult = { success: false, error: errorMsg };
+      // Continue with restart
+    }
+  } else {
+    console.log(`[Restart] SHUTDOWN_SYNC feature flag disabled, skipping pre-shutdown sync`);
+  }
+
+  // Step 2: Kill all processes
+  try {
+    const processes = await sandbox.listProcesses();
+    console.log(`[Restart] Killing ${processes.length} processes for ${userId.slice(0, 8)}...`);
+    
+    for (const proc of processes) {
+      try {
+        await proc.kill();
+        console.log(`[Restart] Killed process ${proc.id}`);
+      } catch (e) {
+        console.log(`[Restart] Failed to kill process ${proc.id}:`, e);
+      }
+    }
+    
+    // Wait for processes to die
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } catch (e) {
+    console.error(`[Restart] Error killing processes for ${userId.slice(0, 8)}...:`, e);
+  }
+
+  // Step 3: Start fresh gateway
+  try {
+    console.log(`[Restart] Starting fresh gateway for ${userId.slice(0, 8)}...`);
+    
+    // Start in background - don't await to avoid timeout
+    ensureMoltbotGateway(sandbox, env, userId).catch(err => {
+      console.error(`[Restart] Gateway start failed for ${userId.slice(0, 8)}...:`, err);
+    });
+    
+    return {
+      success: true,
+      syncResult,
+      message: 'Container restart initiated',
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[Restart] Failed to start gateway for ${userId.slice(0, 8)}...:`, errorMsg);
+    
+    return {
+      success: false,
+      syncResult,
+      message: `Restart failed: ${errorMsg}`,
+    };
+  }
 }

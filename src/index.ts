@@ -34,6 +34,7 @@ import {
   ensureMoltbotGateway,
   findExistingMoltbotProcess,
   syncToR2,
+  syncCriticalFilesToR2,
   getConsecutiveSyncFailures,
   deriveUserGatewayToken,
   getGatewayMasterToken,
@@ -44,7 +45,10 @@ import {
   createRollingBackup,
   getSandboxForUser,
   getInstanceTypeName,
+  runPostRestartVerification,
+  restartContainer,
 } from './gateway';
+import { isBackupFeatureEnabled } from './config/backup';
 import {
   createIssue,
   logSyncEvent,
@@ -947,24 +951,23 @@ async function scheduled(
           }
 
           try {
-            // Kill all processes
-            for (const proc of processes) {
-              try { await proc.kill(); } catch { /* ignore */ }
+            // Use restartContainer which includes pre-shutdown sync (when enabled)
+            const restartResult = await restartContainer(sandbox, env, userId);
+            
+            if (restartResult.success) {
+              recordRestart(userId);
+              restartCount++;
+              logRestartEvent(userId, true, 'auto_health_failure', { 
+                previousFailures: healthResult.consecutiveFailures,
+              });
+              console.log(`[cron] Auto-restart initiated for ${sandboxName}${restartResult.syncResult?.success ? ' with pre-shutdown sync' : ''}`);
+            } else {
+              throw new Error(restartResult.message);
             }
-            await new Promise(r => setTimeout(r, 2000));
-
-            // Start fresh gateway - it handles its own lock cleanup internally
-            ensureMoltbotGateway(sandbox, env, userId).catch((err) => {
-              console.error(`[cron] Auto-restart failed for ${sandboxName}:`, err);
-            });
-
-            recordRestart(userId);
-            restartCount++;
-            logRestartEvent(userId, true, 'auto_health_failure', { previousFailures: healthResult.consecutiveFailures });
-            console.log(`[cron] Auto-restart initiated for ${sandboxName}`);
           } catch (restartErr) {
+            const errorMsg = restartErr instanceof Error ? restartErr.message : 'Unknown error';
             console.error(`[cron] Failed to restart ${sandboxName}:`, restartErr);
-            issues.push({ userId, type: 'restart_failed', error: restartErr instanceof Error ? restartErr.message : 'Unknown error' });
+            issues.push({ userId, type: 'restart_failed', error: errorMsg });
             logRestartEvent(userId, false, 'auto_health_failure', { previousFailures: healthResult.consecutiveFailures });
 
             // Record restart failure to D1
@@ -973,7 +976,7 @@ async function scheduled(
                 type: 'restart',
                 severity: 'critical',
                 userId,
-                message: `Auto-restart failed: ${restartErr instanceof Error ? restartErr.message : 'Unknown error'}`,
+                message: `Auto-restart failed: ${errorMsg}`,
                 details: { previousFailures: healthResult.consecutiveFailures },
               });
             }
@@ -982,6 +985,19 @@ async function scheduled(
       }
 
       // Run sync (only if sandbox is active and healthy or just restarted)
+      // If CRITICAL_FILE_PRIORITY is enabled, sync critical files first
+      let criticalSyncResult: { success: boolean; durationMs?: number } | undefined;
+      
+      if (isBackupFeatureEnabled('CRITICAL_FILE_PRIORITY')) {
+        criticalSyncResult = await syncCriticalFilesToR2(sandbox, env, { r2Prefix });
+        if (criticalSyncResult.success) {
+          console.log(`[cron] Critical files synced for ${sandboxName} in ${criticalSyncResult.durationMs}ms`);
+        } else {
+          console.warn(`[cron] Critical file sync failed for ${sandboxName}:`, criticalSyncResult);
+        }
+      }
+      
+      // Run full sync
       const syncResult = await syncToR2(sandbox, env, { r2Prefix });
 
       // Log sync event

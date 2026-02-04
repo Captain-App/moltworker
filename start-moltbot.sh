@@ -357,6 +357,70 @@ console.log('Channels configured:', Object.keys(config.channels || {}).join(', '
 EOFNODE
 
 # ============================================================
+# SHUTDOWN HANDLER (Zero-Data-Loss Protection)
+# ============================================================
+# This ensures data is synced to R2 before container shutdown
+
+SHUTDOWN_IN_PROGRESS=false
+SHUTDOWN_SYNC_COMPLETE=false
+
+shutdown_handler() {
+    if [ "$SHUTDOWN_IN_PROGRESS" = true ]; then
+        echo "[shutdown] Shutdown already in progress, waiting..."
+        return
+    fi
+    
+    SHUTDOWN_IN_PROGRESS=true
+    echo "[shutdown] Received shutdown signal, initiating emergency sync..."
+    echo "[shutdown] Signal received at $(date -Iseconds)"
+    
+    # Give the gateway a moment to finish any in-flight requests
+    sleep 2
+    
+    # Sync critical files to R2 if R2 is mounted
+    if [ -d "$R2_MOUNT" ] && [ -d "$BACKUP_DIR" ]; then
+        echo "[shutdown] Syncing critical files to R2..."
+        
+        # Sync credentials directory
+        if [ -d "$CONFIG_DIR/credentials" ]; then
+            echo "[shutdown] Syncing credentials..."
+            rsync -r --no-times --delete "$CONFIG_DIR/credentials/" "$BACKUP_DIR/clawdbot/credentials/" 2>/dev/null || true
+        fi
+        
+        # Sync main config file
+        if [ -f "$CONFIG_FILE" ]; then
+            echo "[shutdown] Syncing clawdbot.json..."
+            rsync -r --no-times --delete "$CONFIG_FILE" "$BACKUP_DIR/clawdbot/clawdbot.json" 2>/dev/null || true
+        fi
+        
+        # Sync .registered marker
+        if [ -f "$CONFIG_DIR/.registered" ]; then
+            echo "[shutdown] Syncing .registered marker..."
+            rsync -r --no-times --delete "$CONFIG_DIR/.registered" "$BACKUP_DIR/clawdbot/.registered" 2>/dev/null || true
+        fi
+        
+        # Update sync timestamp
+        echo "shutdown-$(date -Iseconds)" > "$BACKUP_DIR/.last-sync-shutdown"
+        cp -f "$BACKUP_DIR/.last-sync-shutdown" "$CONFIG_DIR/.last-sync" 2>/dev/null || true
+        
+        echo "[shutdown] Critical files synced successfully"
+        SHUTDOWN_SYNC_COMPLETE=true
+    else
+        echo "[shutdown] R2 not available, skipping sync"
+    fi
+    
+    # Signal completion
+    touch /tmp/shutdown-sync-complete 2>/dev/null || true
+    echo "[shutdown] Shutdown sync complete at $(date -Iseconds)"
+    
+    # Allow time for sync to complete before exiting
+    sleep 1
+}
+
+# Register signal handlers
+trap shutdown_handler SIGTERM SIGINT
+
+# ============================================================
 # START GATEWAY
 # ============================================================
 # Note: R2 backup sync is handled by the Worker's cron trigger

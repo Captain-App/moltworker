@@ -398,32 +398,20 @@ debug.get('/admin/users/:userId', async (c) => {
 });
 
 // POST /debug/admin/users/:userId/restart - Restart user's container
-// EMERGENCY BYPASS: Auth disabled for operational recovery
+// With Zero-Data-Loss: Pre-shutdown sync ensures credentials are saved before restart
 debug.post('/admin/users/:userId/restart', async (c) => {
   const userId = c.req.param('userId');
   const { getSandbox } = await import('@cloudflare/sandbox');
-  const { ensureMoltbotGateway } = await import('../gateway');
+  const { restartContainer, isBackupFeatureEnabled } = await import('../gateway');
   
   const sandboxName = `openclaw-${userId}`;
   const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: true });
 
   try {
-    // Kill ALL processes including stale gateway
-    const processes = await sandbox.listProcesses();
-    for (const proc of processes) {
-      try { 
-        await proc.kill(); 
-        console.log(`[RESTART] Killed process ${proc.id}`);
-      } catch (e) { /* ignore */ }
-    }
+    // Use the new restartContainer function which includes pre-shutdown sync
+    const restartResult = await restartContainer(sandbox, c.env, userId);
 
-    // Wait for processes to terminate
-    await new Promise(r => setTimeout(r, 3000));
-
-    // NOTE: Removed aggressive cleanup startProcess calls - they were accumulating
-    // The startup script (start-moltbot.sh) handles its own lock cleanup internally
-
-    // Fix malformed Telegram token in R2 secrets before restart
+    // Fix malformed Telegram token in R2 secrets before restart (if needed)
     try {
       const secretsKey = `users/${userId}/secrets.json`;
       const existing = await c.env.MOLTBOT_BUCKET.get(secretsKey);
@@ -444,19 +432,24 @@ debug.post('/admin/users/:userId/restart', async (c) => {
       console.log(`[RESTART] Token fix skipped: ${e}`);
     }
 
-    // Restart gateway
-    console.log(`[RESTART] Starting fresh gateway for ${userId}`);
-    const bootPromise = ensureMoltbotGateway(sandbox, c.env, userId).catch((err) => {
-      console.error(`[RESTART] Gateway start failed: ${err}`);
-    });
-    c.executionCtx.waitUntil(bootPromise);
+    // Get the count of processes before restart for the response
+    const processes = await sandbox.listProcesses().catch(() => []);
 
     return c.json({
-      success: true,
-      message: 'Container restart initiated with full cleanup',
+      success: restartResult.success,
+      message: restartResult.message,
       userId,
       sandboxName,
       killedProcesses: processes.length,
+      shutdownSync: isBackupFeatureEnabled('SHUTDOWN_SYNC') ? {
+        enabled: true,
+        success: restartResult.syncResult?.success ?? false,
+        error: restartResult.syncResult?.error,
+      } : {
+        enabled: false,
+        note: 'Enable SHUTDOWN_SYNC feature flag for zero-data-loss protection',
+      },
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -495,6 +488,118 @@ debug.post('/admin/users/:userId/kill-zombie', async (c) => {
       processesFound: processes.length,
       killed,
       message: 'Processes killed via sandbox API. Gateway will handle lock cleanup on restart.',
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// ============================================================================
+// ZERO-DATA-LOSS BACKUP VERIFICATION ENDPOINTS (Week 1)
+// ============================================================================
+
+// GET /debug/admin/users/:userId/backup/verify - Verify critical files are in R2
+debug.get('/admin/users/:userId/backup/verify', async (c) => {
+  const userId = c.req.param('userId');
+  const { verifySyncToR2, isBackupFeatureEnabled } = await import('../gateway');
+  
+  try {
+    const result = await verifySyncToR2(c.env, userId);
+    
+    return c.json({
+      userId,
+      passed: result.passed,
+      timestamp: result.timestamp,
+      filesChecked: result.filesChecked,
+      missingCriticalFiles: result.missingCriticalFiles,
+      missingFiles: result.missingFiles,
+      durationMs: result.durationMs,
+      features: {
+        shutdownSync: isBackupFeatureEnabled('SHUTDOWN_SYNC'),
+        criticalFilePriority: isBackupFeatureEnabled('CRITICAL_FILE_PRIORITY'),
+        syncVerification: isBackupFeatureEnabled('SYNC_VERIFICATION'),
+      },
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /debug/admin/users/:userId/backup/critical - List missing critical files
+debug.get('/admin/users/:userId/backup/critical', async (c) => {
+  const userId = c.req.param('userId');
+  const { listMissingCriticalFiles, isBackupFeatureEnabled } = await import('../gateway');
+  
+  try {
+    const result = await listMissingCriticalFiles(c.env, userId);
+    
+    return c.json({
+      userId,
+      timestamp: result.timestamp,
+      allCriticalFilesPresent: result.allCriticalFilesPresent,
+      missingConfig: result.missingConfig,
+      missingCredentials: result.missingCredentials,
+      r2Path: result.r2Path,
+      features: {
+        shutdownSync: isBackupFeatureEnabled('SHUTDOWN_SYNC'),
+        criticalFilePriority: isBackupFeatureEnabled('CRITICAL_FILE_PRIORITY'),
+      },
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// GET /debug/admin/users/:userId/backup/health - Full backup health status
+debug.get('/admin/users/:userId/backup/health', async (c) => {
+  const userId = c.req.param('userId');
+  const { getBackupHealthStatus, getRecentSyncResults } = await import('../gateway');
+  
+  try {
+    const health = await getBackupHealthStatus(c.env, userId);
+    const recentSyncs = getRecentSyncResults(`users/${userId}`);
+    
+    return c.json({
+      userId,
+      healthy: health.healthy,
+      r2Connected: health.r2Connected,
+      criticalFilesPresent: health.criticalFilesPresent,
+      missingCriticalFiles: health.missingCriticalFiles,
+      issues: health.issues,
+      recentSyncs: recentSyncs.slice(0, 5).map(s => ({
+        success: s.success,
+        timestamp: s.lastSync,
+        syncId: s.syncId,
+        fileCount: s.fileCount,
+        durationMs: s.durationMs,
+        error: s.error,
+      })),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
+});
+
+// POST /debug/admin/users/:userId/backup/alert - Trigger alert if missing critical files
+debug.post('/admin/users/:userId/backup/alert', async (c) => {
+  const userId = c.req.param('userId');
+  const { alertIfMissingCriticalFiles } = await import('../gateway');
+  
+  try {
+    const alerted = await alertIfMissingCriticalFiles(c.env, userId);
+    
+    return c.json({
+      userId,
+      alerted,
+      message: alerted 
+        ? 'Alert triggered: Missing critical files detected' 
+        : 'No alert needed: All critical files present',
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';

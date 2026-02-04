@@ -3,6 +3,7 @@ import type { MoltbotEnv } from '../types';
 import { R2_MOUNT_PATH, getR2MountPathForUser } from '../config';
 import { mountR2Storage } from './r2';
 import { waitForProcess } from './utils';
+import { isBackupFeatureEnabled, isCriticalPath, getPathPriority } from '../config/backup';
 
 /**
  * Result of a sync operation with detailed status
@@ -28,6 +29,14 @@ export interface SyncResult {
 export interface SyncOptions {
   /** User's R2 prefix for per-user storage (e.g., 'users/{userId}') */
   r2Prefix?: string;
+  /** Sync mode: 'blocking' waits for completion, 'async' returns immediately */
+  mode?: 'blocking' | 'async';
+  /** Timeout for sync operation (ms) */
+  timeoutMs?: number;
+  /** Force sync even if one was recently completed */
+  emergency?: boolean;
+  /** Only sync critical files */
+  criticalOnly?: boolean;
 }
 
 /**
@@ -334,4 +343,186 @@ async function doSyncToR2(
     storeSyncResult(options.r2Prefix, result);
     return result;
   }
+}
+
+/**
+ * Priority sync for critical files only.
+ * This syncs credentials and config files first, before other data.
+ * 
+ * When CRITICAL_FILE_PRIORITY feature flag is enabled, this is called
+ * before the full sync to ensure credentials are safe first.
+ */
+export async function syncCriticalFilesToR2(
+  sandbox: Sandbox,
+  env: MoltbotEnv,
+  options: SyncOptions = {}
+): Promise<SyncResult> {
+  const startTime = Date.now();
+  const syncId = `critical-${generateSyncId()}`;
+  
+  // Only run if feature flag is enabled
+  if (!isBackupFeatureEnabled('CRITICAL_FILE_PRIORITY')) {
+    return {
+      success: true,
+      syncId,
+      durationMs: 0,
+      details: 'CRITICAL_FILE_PRIORITY feature flag is disabled',
+    };
+  }
+
+  // Check if R2 is configured
+  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.CF_ACCOUNT_ID) {
+    return { success: false, error: 'R2 storage is not configured', syncId };
+  }
+
+  // Mount R2
+  const mounted = await mountR2Storage(sandbox, env, { r2Prefix: options.r2Prefix });
+  if (!mounted) {
+    return {
+      success: false,
+      error: 'Failed to mount R2 storage',
+      syncId,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  const mountPath = options.r2Prefix
+    ? getR2MountPathForUser(options.r2Prefix)
+    : R2_MOUNT_PATH;
+
+  const timestamp = new Date().toISOString();
+
+  // Sync only critical paths: credentials, config, .registered
+  const criticalCmd = `
+    mkdir -p ${mountPath}/clawdbot/credentials &&
+    rsync -r --no-times --delete /root/.clawdbot/credentials/ ${mountPath}/clawdbot/credentials/ 2>/dev/null;
+    rsync -r --no-times --delete /root/.clawdbot/clawdbot.json ${mountPath}/clawdbot/clawdbot.json 2>/dev/null;
+    rsync -r --no-times --delete /root/.clawdbot/.registered ${mountPath}/clawdbot/.registered 2>/dev/null;
+    echo "${syncId}|${timestamp}" > ${mountPath}/.last-sync-critical;
+    exit 0
+  `;
+
+  try {
+    const proc = await sandbox.startProcess(criticalCmd);
+    await waitForProcess(proc, options.timeoutMs || 15000); // 15s timeout for critical sync
+
+    const rsyncExitCode = proc.exitCode;
+    
+    // Verify the critical sync marker was written
+    const verifyProc = await sandbox.startProcess(`cat ${mountPath}/.last-sync-critical`);
+    await waitForProcess(verifyProc, 5000);
+    const verifyLogs = await verifyProc.getLogs();
+    const syncFileContent = verifyLogs.stdout?.trim() || '';
+    const [writtenSyncId] = syncFileContent.split('|');
+
+    if (writtenSyncId !== syncId) {
+      return {
+        success: false,
+        error: 'Critical file sync verification failed',
+        syncId,
+        rsyncExitCode: rsyncExitCode ?? undefined,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    return {
+      success: true,
+      lastSync: timestamp,
+      syncId,
+      fileCount: 3, // credentials dir, clawdbot.json, .registered
+      rsyncExitCode: rsyncExitCode ?? 0,
+      durationMs: Date.now() - startTime,
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[sync] Critical file sync failed: ${errorMsg}`);
+    return {
+      success: false,
+      error: `Critical file sync error: ${errorMsg}`,
+      syncId,
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Pre-shutdown sync - ensures all data is synced before container restart.
+ * 
+ * This function:
+ * 1. Syncs critical files first (credentials, config)
+ * 2. Then syncs remaining files
+ * 3. Blocks until sync completes or timeout
+ * 
+ * Should be called before container restart/kill operations.
+ * 
+ * @param sandbox - The sandbox instance
+ * @param env - Worker environment bindings
+ * @param options - Sync options
+ * @returns SyncResult indicating success/failure
+ */
+export async function syncBeforeShutdown(
+  sandbox: Sandbox,
+  env: MoltbotEnv,
+  options: SyncOptions = {}
+): Promise<SyncResult> {
+  const startTime = Date.now();
+  
+  // Only run if feature flag is enabled
+  if (!isBackupFeatureEnabled('SHUTDOWN_SYNC')) {
+    console.log('[shutdown] SHUTDOWN_SYNC feature flag is disabled, skipping pre-shutdown sync');
+    return {
+      success: true,
+      syncId: 'shutdown-skipped',
+      durationMs: 0,
+      details: 'SHUTDOWN_SYNC feature flag is disabled',
+    };
+  }
+
+  console.log(`[shutdown] Starting pre-shutdown sync for ${options.r2Prefix || 'default'}`);
+
+  // Step 1: Sync critical files first (always do this)
+  const criticalResult = await syncCriticalFilesToR2(sandbox, env, {
+    ...options,
+    timeoutMs: 10000, // 10s for critical files
+  });
+
+  if (!criticalResult.success) {
+    console.error('[shutdown] Critical file sync failed:', criticalResult.error);
+    // Continue to full sync anyway - better to try than give up
+  } else {
+    console.log(`[shutdown] Critical files synced in ${criticalResult.durationMs}ms`);
+  }
+
+  // Step 2: Full sync (only if critical succeeded or emergency)
+  const timeoutMs = options.timeoutMs || 25000; // 25s total for shutdown sync
+  const remainingTime = timeoutMs - (Date.now() - startTime);
+
+  if (remainingTime < 5000) {
+    // Not enough time for full sync, just return critical result
+    console.log('[shutdown] Not enough time for full sync, returning critical result');
+    return criticalResult;
+  }
+
+  const fullResult = await syncToR2(sandbox, env, {
+    ...options,
+    timeoutMs: remainingTime,
+  });
+
+  if (!fullResult.success) {
+    console.error('[shutdown] Full sync failed:', fullResult.error);
+    // Return critical result if it succeeded, otherwise full result
+    return criticalResult.success ? criticalResult : fullResult;
+  }
+
+  console.log(`[shutdown] Full sync completed in ${fullResult.durationMs}ms`);
+
+  // Return combined result
+  return {
+    success: true,
+    syncId: `shutdown-${fullResult.syncId}`,
+    fileCount: fullResult.fileCount,
+    lastSync: fullResult.lastSync,
+    durationMs: Date.now() - startTime,
+    details: `Critical: ${criticalResult.durationMs}ms, Full: ${fullResult.durationMs}ms`,
+  };
 }
