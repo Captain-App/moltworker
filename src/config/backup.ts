@@ -27,10 +27,31 @@ export const BACKUP_FEATURE_FLAGS = {
 };
 
 /**
- * Check if a backup feature is enabled
+ * Canary users for phased rollout
+ * Add user IDs here to enable Phase 2 features for specific users
  */
-export function isBackupFeatureEnabled(flag: keyof typeof BACKUP_FEATURE_FLAGS): boolean {
-  return BACKUP_FEATURE_FLAGS[flag];
+export const CANARY_USERS = [
+  // Jack and Josh - Phase 2 real-time sync testing
+  'jack-lippold',
+  'joshua-carey',
+];
+
+/**
+ * Check if a backup feature is enabled
+ * For Phase 2+ features, checks canary list
+ */
+export function isBackupFeatureEnabled(
+  flag: keyof typeof BACKUP_FEATURE_FLAGS,
+  userId?: string
+): boolean {
+  const globallyEnabled = BACKUP_FEATURE_FLAGS[flag];
+  
+  // Phase 2+ features require canary status until fully rolled out
+  if (flag === 'REALTIME_SYNC' && userId) {
+    return CANARY_USERS.includes(userId);
+  }
+  
+  return globallyEnabled;
 }
 
 /**
