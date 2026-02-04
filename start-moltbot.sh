@@ -70,20 +70,23 @@ fi
 echo "Config directory: $CONFIG_DIR"
 echo "Backup directory: $BACKUP_DIR"
 
-# Wait for R2 mount to be available (async mount can take a few seconds)
+# Wait for R2 mount to be available (async mount can take time on tiered sandboxes)
 echo "Waiting for R2 mount..."
 R2_WAIT=0
-while [ ! -d "$R2_MOUNT" ] && [ $R2_WAIT -lt 30 ]; do
+MAX_WAIT=120  # Increased from 30 to 120 seconds for tiered sandboxes
+while [ ! -d "$R2_MOUNT" ] && [ $R2_WAIT -lt $MAX_WAIT ]; do
     sleep 1
     R2_WAIT=$((R2_WAIT + 1))
-    echo "Waiting for R2... ($R2_WAIT/30)"
+    if [ $((R2_WAIT % 10)) -eq 0 ]; then
+        echo "Waiting for R2... ($R2_WAIT/$MAX_WAIT)"
+    fi
 done
 
 if [ -d "$R2_MOUNT" ]; then
-    echo "R2 mounted at $R2_MOUNT"
+    echo "R2 mounted at $R2_MOUNT after ${R2_WAIT}s"
     ls -la "$R2_MOUNT" | head -5
 else
-    echo "R2 mount not available after 30s, continuing without backup restore"
+    echo "R2 mount not available after ${MAX_WAIT}s, continuing without backup restore"
 fi
 
 # Create config directory
