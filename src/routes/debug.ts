@@ -47,8 +47,8 @@ debug.get('/admin/users/:userId/ps', async (c) => {
 debug.get('/version', async (c) => {
   const sandbox = c.get('sandbox');
   try {
-    // Get moltbot version (CLI is still named clawdbot until upstream renames)
-    const versionProcess = await sandbox.startProcess('clawdbot --version');
+    // Get openclaw version
+    const versionProcess = await sandbox.startProcess('openclaw --version');
     await new Promise(resolve => setTimeout(resolve, 500));
     const versionLogs = await versionProcess.getLogs();
     const moltbotVersion = (versionLogs.stdout || versionLogs.stderr || '').trim();
@@ -157,10 +157,10 @@ debug.get('/gateway-api', async (c) => {
   }
 });
 
-// GET /debug/cli - Test moltbot CLI commands (CLI is still named clawdbot)
+// GET /debug/cli - Test openclaw CLI commands
 debug.get('/cli', async (c) => {
   const sandbox = c.get('sandbox');
-  const cmd = c.req.query('cmd') || 'clawdbot --help';
+  const cmd = c.req.query('cmd') || 'openclaw --help';
   
   try {
     const proc = await sandbox.startProcess(cmd);
@@ -607,6 +607,53 @@ debug.post('/admin/users/:userId/backup/alert', async (c) => {
   }
 });
 
+// POST /debug/admin/users/:userId/force-sync - Force sync a user's data to R2
+// Works even if user has never synced before (first-time sync)
+debug.post('/admin/users/:userId/force-sync', async (c) => {
+  const userId = c.req.param('userId');
+  const { getSandbox } = await import('@cloudflare/sandbox');
+  const { syncToR2 } = await import('../gateway');
+  const sandboxName = `openclaw-${userId}`;
+
+  try {
+    const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: true });
+    const r2Prefix = `users/${userId}`;
+
+    // First check if container is running
+    const processes = await sandbox.listProcesses();
+    if (processes.length === 0) {
+      return c.json({
+        error: 'Container not running',
+        message: 'Cannot sync - container has no active processes. Start the gateway first.',
+        userId,
+        sandboxName,
+      }, 400);
+    }
+
+    // Force sync to R2
+    console.log(`[force-sync] Triggering sync for ${userId}...`);
+    const syncResult = await syncToR2(sandbox, c.env, {
+      r2Prefix,
+      mode: 'blocking',
+      timeoutMs: 60000,
+    });
+
+    return c.json({
+      success: syncResult.success,
+      userId,
+      sandboxName,
+      syncResult,
+      message: syncResult.success
+        ? `Synced ${syncResult.fileCount} files to R2`
+        : `Sync failed: ${syncResult.error}`,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage, userId, sandboxName }, 500);
+  }
+});
+
 // POST /debug/admin/users/:userId/destroy - Force destroy a stuck sandbox
 // Calls destroy() directly without trying to list processes first
 debug.post('/admin/users/:userId/destroy', async (c) => {
@@ -659,7 +706,7 @@ debug.post('/admin/users/:userId/add-group', async (c) => {
 
   try {
     // Read current config
-    const configProc = await sandbox.startProcess('cat /root/.clawdbot/clawdbot.json');
+    const configProc = await sandbox.startProcess('cat /root/.openclaw/openclaw.json');
     await new Promise(r => setTimeout(r, 1000));
     const logs = await configProc.getLogs();
     const configStr = logs.stdout || '{}';
@@ -683,7 +730,7 @@ debug.post('/admin/users/:userId/add-group', async (c) => {
 
     // Write updated config
     const newConfigStr = JSON.stringify(config, null, 2);
-    await sandbox.startProcess(`echo '${newConfigStr}' > /root/.clawdbot/clawdbot.json`);
+    await sandbox.startProcess(`echo '${newConfigStr}' > /root/.openclaw/openclaw.json`);
 
     return c.json({
       success: true,
@@ -924,7 +971,7 @@ debug.get('/sync-status', async (c) => {
     // Read .last-sync from container (local state)
     let localSyncInfo: { timestamp: string | null; error?: string } = { timestamp: null };
     try {
-      const localProc = await sandbox.startProcess('cat /root/.clawdbot/.last-sync 2>/dev/null || echo "NOT_FOUND"');
+      const localProc = await sandbox.startProcess('cat /root/.openclaw/.last-sync 2>/dev/null || echo "NOT_FOUND"');
       await new Promise(r => setTimeout(r, 1000));
       const localLogs = await localProc.getLogs();
       const content = (localLogs.stdout || '').trim();
@@ -964,7 +1011,7 @@ debug.get('/sync-status', async (c) => {
     // Check if a sync is currently running
     let syncRunning = false;
     try {
-      const syncProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.clawdbot" >/dev/null && echo "RUNNING" || echo "NOT_RUNNING"');
+      const syncProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.openclaw" >/dev/null && echo "RUNNING" || echo "NOT_RUNNING"');
       await new Promise(r => setTimeout(r, 500));
       const syncLogs = await syncProc.getLogs();
       syncRunning = (syncLogs.stdout || '').includes('RUNNING');
@@ -972,10 +1019,10 @@ debug.get('/sync-status', async (c) => {
       // Ignore
     }
 
-    // Check if clawdbot.json exists locally
+    // Check if openclaw.json exists locally
     let hasLocalConfig = false;
     try {
-      const configProc = await sandbox.startProcess('test -f /root/.clawdbot/clawdbot.json && echo "EXISTS"');
+      const configProc = await sandbox.startProcess('test -f /root/.openclaw/openclaw.json && echo "EXISTS"');
       await new Promise(r => setTimeout(r, 500));
       const configLogs = await configProc.getLogs();
       hasLocalConfig = (configLogs.stdout || '').includes('EXISTS');
@@ -1019,7 +1066,7 @@ function diagnoseIssues(
   }
 
   if (!hasLocalConfig) {
-    issues.push('WARNING: No local clawdbot.json. Sync will be skipped to prevent wiping R2 backup.');
+    issues.push('WARNING: No local openclaw.json. Sync will be skipped to prevent wiping R2 backup.');
   }
 
   if (!r2Sync.timestamp && hasLocalConfig) {
@@ -1064,7 +1111,7 @@ debug.get('/container-config', async (c) => {
   const sandbox = c.get('sandbox');
   
   try {
-    const proc = await sandbox.startProcess('cat /root/.clawdbot/clawdbot.json');
+    const proc = await sandbox.startProcess('cat /root/.openclaw/openclaw.json');
     
     let attempts = 0;
     while (attempts < 10) {
@@ -1149,7 +1196,7 @@ debug.post('/admin/users/:userId/fix-telegram', async (c) => {
 
   try {
     // Read current config
-    const configProc = await sandbox.startProcess('cat /root/.clawdbot/clawdbot.json');
+    const configProc = await sandbox.startProcess('cat /root/.openclaw/openclaw.json');
     await new Promise(r => setTimeout(r, 1000));
     const logs = await configProc.getLogs();
     const configStr = logs.stdout || '{}';
@@ -1180,7 +1227,7 @@ debug.post('/admin/users/:userId/fix-telegram', async (c) => {
 
     // Write updated config - escape single quotes in JSON
     const escapedConfig = newConfigStr.replace(/'/g, "'\\''");
-    await sandbox.startProcess(`echo '${escapedConfig}' > /root/.clawdbot/clawdbot.json`);
+    await sandbox.startProcess(`echo '${escapedConfig}' > /root/.openclaw/openclaw.json`);
     await new Promise(r => setTimeout(r, 500));
 
     return c.json({
@@ -1265,7 +1312,7 @@ debug.get('/admin/users/:userId/r2-backup', async (c) => {
     
     // Otherwise, list files or read default config
     // Read config from R2
-    const configKey = `users/${userId}/clawdbot/clawdbot.json`;
+    const configKey = `users/${userId}/openclaw/openclaw.json`;
     const configObj = await c.env.MOLTBOT_BUCKET.get(configKey);
 
     // Read last-sync marker
@@ -1307,7 +1354,7 @@ debug.get('/admin/users/:userId/config', async (c) => {
   const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: true });
 
   try {
-    const configProc = await sandbox.startProcess('cat /root/.clawdbot/clawdbot.json');
+    const configProc = await sandbox.startProcess('cat /root/.openclaw/openclaw.json');
     await new Promise(r => setTimeout(r, 1000));
     const logs = await configProc.getLogs();
     const configStr = logs.stdout || '{}';
@@ -1360,7 +1407,7 @@ debug.get('/admin/users/:userId/sync-status', async (c) => {
     try {
       const listed = await c.env.MOLTBOT_BUCKET.list({ prefix: `users/${userId}/` });
       r2BackupFiles = listed.objects.map(o => o.key);
-      r2BackupExists = r2BackupFiles.some(k => k.includes('clawdbot.json'));
+      r2BackupExists = r2BackupFiles.some(k => k.includes('openclaw.json'));
     } catch {
       // Ignore
     }
@@ -1378,12 +1425,12 @@ debug.get('/admin/users/:userId/sync-status', async (c) => {
       containerStatus = {
         available: true,
         processCount: processes.length,
-        gatewayRunning: processes.some((p: any) => p.command?.includes('clawdbot gateway') && p.status === 'running'),
+        gatewayRunning: processes.some((p: any) => p.command?.includes('openclaw gateway') && p.status === 'running'),
       };
 
       // Read local .last-sync
       try {
-        const localProc = await sandbox.startProcess('cat /root/.clawdbot/.last-sync 2>/dev/null || echo "NOT_FOUND"');
+        const localProc = await sandbox.startProcess('cat /root/.openclaw/.last-sync 2>/dev/null || echo "NOT_FOUND"');
         await new Promise(r => setTimeout(r, 1000));
         const localLogs = await localProc.getLogs();
         const content = (localLogs.stdout || '').trim();
@@ -1406,7 +1453,7 @@ debug.get('/admin/users/:userId/sync-status', async (c) => {
 
       // Check local config
       try {
-        const configProc = await sandbox.startProcess('test -f /root/.clawdbot/clawdbot.json && echo "EXISTS"');
+        const configProc = await sandbox.startProcess('test -f /root/.openclaw/openclaw.json && echo "EXISTS"');
         await new Promise(r => setTimeout(r, 500));
         const configLogs = await configProc.getLogs();
         hasLocalConfig = (configLogs.stdout || '').includes('EXISTS');
@@ -1416,7 +1463,7 @@ debug.get('/admin/users/:userId/sync-status', async (c) => {
 
       // Check sync running
       try {
-        const syncProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.clawdbot" >/dev/null && echo "RUNNING" || echo "NOT_RUNNING"');
+        const syncProc = await sandbox.startProcess('pgrep -f "rsync.*/root/.openclaw" >/dev/null && echo "RUNNING" || echo "NOT_RUNNING"');
         await new Promise(r => setTimeout(r, 500));
         const syncLogs = await syncProc.getLogs();
         syncRunning = (syncLogs.stdout || '').includes('RUNNING');
@@ -1494,7 +1541,7 @@ function diagnoseUserIssues(
   }
 
   if (!hasLocalConfig) {
-    issues.push('WARNING: No local clawdbot.json in container. Sync skipped to prevent wiping R2.');
+    issues.push('WARNING: No local openclaw.json in container. Sync skipped to prevent wiping R2.');
     if (r2BackupExists) {
       issues.push('INFO: R2 backup exists but wasn\'t restored. Check startup logs.');
     }
@@ -1649,8 +1696,8 @@ debug.get('/admin/users/:userId/sessions', async (c) => {
   try {
     const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
     
-    // Session files are in ~/.clawdbot/agents/*/sessions/
-    const agentsDir = '/root/.clawdbot/agents';
+    // Session files are in ~/.openclaw/agents/*/sessions/
+    const agentsDir = '/root/.openclaw/agents';
     let sessions: Array<{
       sessionId: string;
       lastActivity: string | null;
@@ -1812,7 +1859,7 @@ debug.get('/admin/users/:userId/sessions/:sessionId/messages', async (c) => {
     const sandbox = getSandbox(c.env.Sandbox, sandboxName, { keepAlive: false });
     
     // Find the session file in agents directory
-    const findProc = await sandbox.startProcess(`find /root/.clawdbot/agents -name "${sessionId}.jsonl" -type f 2>/dev/null`);
+    const findProc = await sandbox.startProcess(`find /root/.openclaw/agents -name "${sessionId}.jsonl" -type f 2>/dev/null`);
     await new Promise(r => setTimeout(r, 2000));
     const findLogs = await findProc.getLogs();
     const sessionFile = (findLogs.stdout || '').trim().split('\n')[0];
