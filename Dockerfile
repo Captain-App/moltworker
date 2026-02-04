@@ -23,9 +23,7 @@ RUN npm install -g pnpm
 # Install openclaw from pre-built package
 # The openclaw-source/dist folder is built locally and copied here
 COPY openclaw-dist/ /usr/local/lib/node_modules/openclaw/
-RUN cd /usr/local/lib/node_modules/openclaw \
-    && npm install --production --ignore-scripts \
-    && ln -s /usr/local/lib/node_modules/openclaw/dist/cli.mjs /usr/local/bin/openclaw \
+RUN ln -s /usr/local/lib/node_modules/openclaw/dist/cli.mjs /usr/local/bin/openclaw \
     && chmod +x /usr/local/bin/openclaw \
     && openclaw --version
 
