@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y git python3 make g++
 # Clone and build openclaw from Captain-App fork (includes CaptainApp provider)
 RUN git clone https://github.com/Captain-App/openclaw.git /tmp/openclaw-build \
     && cd /tmp/openclaw-build \
-    && npm install \
+    && npm install --legacy-peer-deps --force || npm install --ignore-scripts \
     && npm run build \
     && npm pack \
     && npm install -g captain-app-openclaw-*.tgz \
@@ -42,7 +42,7 @@ RUN mkdir -p /root/.openclaw \
 
 # Copy startup script
 # Build cache bust: 2026-02-04-v12-captainapp-provider
-ARG BUILD_VERSION=v16
+ARG BUILD_VERSION=v17
 COPY start-moltbot.sh /usr/local/bin/start-moltbot.sh
 RUN chmod +x /usr/local/bin/start-moltbot.sh
 
